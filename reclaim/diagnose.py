@@ -247,3 +247,70 @@ class HardenedDiagnoser:
         if safe_note and d.source in ("llm", "llm_fallback"):
             d.confidence = min(d.confidence, self.NOTE_DERIVED_CONFIDENCE_CAP)
         return d
+
+
+class CachedDiagnoser:
+    """Memoise diagnoses by signature, and count what that saves.
+
+    The scalability argument in the README is that diagnosis is a low-cardinality
+    function: the space of `(error_reason, method, recurring)` signatures is
+    bounded by the gateway's vocabulary, not by traffic. This class makes that
+    claim executable rather than rhetorical -- `calls` and `hits` are the
+    measured numbers, not an estimate.
+
+    Two keying strategies, because the first one measured far worse than the
+    projection suggested:
+
+      "strict"    key on (reason, method, recurring) and let anything with a
+                  merchant note bypass the cache. Safe, and on data where most
+                  payments carry a note it produced a 23% hit rate against a
+                  projected 99.98% -- the projection was a bound on note-free
+                  traffic and was being quoted as though it were the rate.
+
+      "note"      fold a normalised note into the key. Merchant notes are mostly
+                  templated -- picked from a dropdown, or typed from habit -- so
+                  identical text recurs constantly and caching it is both safe
+                  (the input really is identical) and effective.
+
+    Normalisation is case and whitespace only. Nothing semantic: two notes that
+    mean the same thing but read differently are two different inputs, and
+    deciding otherwise is exactly the kind of cleverness that makes a cache
+    return the wrong answer.
+    """
+
+    def __init__(self, inner=None, *, key_strategy: str = "note") -> None:
+        self.key_strategy = key_strategy
+        self.inner = inner or TieredDiagnoser()
+        self.name = f"cached({getattr(self.inner, 'name', 'inner')})"
+        self._cache: dict[tuple, Diagnosis] = {}
+        self.calls = 0
+        self.hits = 0
+        self.uncacheable = 0
+
+    def signature(self, p: FailedPayment) -> tuple | None:
+        base = (p.error_reason, p.method, p.is_recurring)
+        if not p.merchant_note:
+            return base
+        if self.key_strategy == "strict":
+            return None
+        return base + (" ".join(p.merchant_note.lower().split()),)
+
+    def diagnose(self, p: FailedPayment) -> Diagnosis:
+        key = self.signature(p)
+        if key is None:
+            self.uncacheable += 1
+            self.calls += 1
+            return self.inner.diagnose(p)
+        if key in self._cache:
+            self.hits += 1
+            import dataclasses
+            return dataclasses.replace(self._cache[key])
+        self.calls += 1
+        d = self.inner.diagnose(p)
+        self._cache[key] = d
+        return d
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.calls + self.hits
+        return self.hits / total if total else 0.0
