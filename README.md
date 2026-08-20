@@ -1,237 +1,301 @@
 # Reclaim
 
-**An agent that finds revenue slipping away across four surfaces, decides who is worth
-chasing under a real capacity budget, and runs a bounded recovery workflow — with an audit
-trail for every rupee it moves and every action it refused to take.**
+**A revenue-recovery agent that cannot break the rules, and that measures what it
+actually caused rather than what it took credit for.**
 
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-python3 data/events.py             # 30-day raw merchant event stream
-python3 data/generate.py           # failed-payment dataset
-python3 eval/run_detect_eval.py    # stage 1: what is slipping away, and who is worth chasing
-python3 eval/run_eval.py           # stage 2: recovery, vs three baselines
+./run_all.sh        # every suite, ~10 seconds, no dependencies, no network
 ```
 
-No dependencies. Python 3.11+. The whole evaluation runs in under a second.
+Python 3.11+. Nothing to install. Every number below is reproduced by that command.
 
 ---
 
-## Stage 1 — detection
+## What is actually new here
 
-Revenue does not usually announce itself as it leaves. A failed payment does, but a stalled
-checkout emits **nothing at all**, and an invoice going bad looks exactly like one that has
-not come due yet. So the pipeline starts from a raw 30-day event stream — 1,580 events, most
-of them perfectly fine — and has to find the 687 stalls in it across four surfaces.
+Two of the three big pieces in this repo are **not** novel, and saying so is the
+only way the third claim is worth anything.
 
-The target label is not "did this stall" but **`is_worth_chasing`: at risk AND not going to
-fix itself.** Roughly half of all stalls self-recover — the customer comes back, tops up the
-balance, pays the invoice late but pays it. Chasing them is not a win. It is a message nobody
-wanted, and on a big enough base it costs more than the revenue it claims to save. Recovery
-dashboards book those as recovered revenue. They aren't.
+- **ML-timed retries already ship.** Stripe Smart Retries, Butter and Churnkey do
+  this, and there are granted patents on machine-learned dunning. Our learned
+  detector is competent engineering, not invention.
+- **The compliance kernel is a safety shield**, a well-established pattern from
+  safe RL and, more recently, LLM agent safety. Applying it to Indian payment
+  regulation and machine-checking it is careful work, not a new idea.
 
-That makes detection ground truth **counterfactual**, which is the genuinely hard part.
+The new part is what those two do *together*:
 
-### The signal is not evenly distributed
+> A shield refuses to act for reasons that have nothing to do with the customer.
+> That is **exogenous non-treatment** — which is exactly the randomised holdout
+> that causal measurement requires, except regulation pays for it instead of you.
 
-| surface | stalls (test) | base rate | **AUC** |
+A UPI mandate failing at 12:59 cannot be retried; one failing at 13:01 can,
+because an NPCI peak window closes at 13:00. Nobody picks their failure minute.
+The regulation has run a randomised experiment on our behalf and the shield is
+where the assignment is recorded.
+
+In the shielding literature a shield is pure cost — it only ever removes options.
+Here it also **produces the identification strategy**. That inversion is the
+contribution, and §4 grades it against a known answer.
+
+---
+
+## The pipeline
+
+```
+raw events ──▶ detect ──▶ observe ──▶ LEGAL SET ──▶ model picks ──▶ act ──▶ audit
+                            (facts)   (kernel)      (inside it)            (hash-chained)
+                                          │
+                                          └──▶ refusals ──▶ causal measurement
+```
+
+The one structural decision everything else follows from: **the kernel reads no
+model output.** Legality is computed from a response code, a counter and a clock,
+before the model's opinion is consulted. So the model chooses *within* the legal
+set and never sees an illegal option.
+
+---
+
+## 1. Detection — finding what is slipping away
+
+Revenue rarely announces itself as it leaves. A failed payment does; a stalled
+checkout emits **nothing at all**. So the pipeline starts from a raw 30-day event
+stream — 1,580 events, most of them fine — and finds the 687 stalls across four
+surfaces.
+
+The target label is not "did this stall" but **`is_worth_chasing`: at risk AND not
+going to fix itself.** Around half of all stalls self-recover. Chasing them is not
+a win; it is a message nobody wanted.
+
+| surface | stalls | base rate | **AUC** |
 |---|---|---|---|
-| subscription | 31 | 0.84 | **0.862** |
-| receivable | 76 | 0.21 | **0.710** |
-| checkout abandonment | 95 | 0.57 | **0.531** |
-| all | 202 | 0.48 | 0.779 |
+| subscription | 31 | 0.84 | **0.908** |
+| receivable | 76 | 0.21 | **0.764** |
+| checkout abandonment | 95 | 0.57 | **0.528** |
+| all | 202 | 0.48 | 0.781 |
 
-Read that column before believing any money number below it.
-
-Abandoned carts are **barely better than a coin flip**, and training to convergence does not
-move it — this is a feature ceiling, not underfitting. Session metadata simply does not know
-whether someone meant to buy. That is a finding, not a failure: the industry default is to
-blanket-message every abandoned cart, and this says those messages are close to untargeted.
-Either get features that carry intent, or stop spending capacity there. Do not dress up a
-0.53 AUC as personalisation.
+Read that column before believing anything below it. **Abandoned carts are a coin
+flip**, and training to convergence does not move it — a feature ceiling, not
+underfitting. Session metadata does not know whether someone meant to buy. The
+industry default is to blanket-message every abandoned cart; this says those
+messages are close to untargeted.
 
 ### Cost is not the constraint. Capacity is.
 
-The first version of this eval picked a threshold on expected value, and the optimum came out
-at *chase everything* — with a WhatsApp nudge at 70 paise against a cart worth thousands,
-almost any flag is EV-positive. That result is kept in the repo because it says something
-real: intervention **cost** is not what makes detection hard.
-
-Capacity is. A collections team makes a bounded number of calls a month. So the honest
-problem is not "which items clear a value bar" but **given room for K interventions, which K** —
-a ranking problem, where precision at the top is the whole game.
+Thresholding on expected value produced *chase everything* — a 70-paise nudge
+against a cart worth thousands is EV-positive at almost any precision. That dead
+end is kept in the repo because it is informative. The real constraint is that a
+collections team makes a bounded number of calls, so the question is **given room
+for K interventions, which K**.
 
 | budget | ranker | prec@K | net ₹ |
 |---|---|---|---|
 | 20 | biggest amounts first | 0.05 | 2,08,176 |
 | 20 | **model probability × value** | 0.30 | **7,78,414** |
-| 50 | biggest amounts first | 0.18 | 12,42,860 |
-| 50 | **model probability × value** | 0.22 | **13,33,597** |
 | 100 | biggest amounts first | 0.32 | **14,83,585** |
 | 100 | model probability × value | 0.33 | 14,69,552 |
 
-At a budget of 20 the model is worth **3.7×** what chasing the biggest invoices is worth. At
-100 it is slightly *behind* — and that is exactly what should happen, because a budget of 100
-out of 202 candidates is drifting back toward chasing everything, where ranking cannot help
-anyone. **The tighter the capacity, the more the model is worth.** Reporting only the budget
+**3.7× at a budget of 20**, and slightly *behind* at 100 — which is what should
+happen, since 100 of 202 candidates is drifting back toward chasing everything.
+The tighter the capacity, the more the model is worth. Reporting only the budget
 where it wins would be the easiest lie in this repo to tell.
 
-Note also that ranking on probability *alone* has the best precision at every budget (1.00 at
-K=20) and the **worst** net rupees. It carefully selects certainties worth ₹300. Precision is
-not the objective; money is.
+Ranking on probability *alone* has the best precision at every budget (1.00 at
+K=20) and the **worst** rupees: it selects certainties worth ₹300.
 
----
+## 2. The compliance kernel — verified, then attacked
 
-## Stage 2 — recovery
+Nine hard constraints govern Indian payment recovery, and **not one needs a
+model**: Visa Category 1 codes, the 15-per-30-days Visa cap and 10 for Mastercard,
+NPCI's 4-attempts-per-mandate-cycle and non-peak execution windows, RBI's 2026
+e-mandate 24-hour pre-debit notice, RBI's 08:00–19:00 working-day collections
+window, DPDP consent. All are functions of a code, a counter, a clock, a calendar.
 
-On a held-out set of 240 failed payments carrying ₹24.7 lakh of at-risk revenue:
+So `compliance.py` computes the feasible action set from an `ObservableState` on
+which **no field is a model output**, and the policy projects its proposal into
+that set — preferring to defer over to abandon, because a rule that says *not now*
+is not a rule that says *never*.
 
-| strategy | recovered | net ₹ | actions | compliance violations | wasted retries |
-|---|---|---|---|---|---|
-| do nothing | 0.0% | 0 | 0 | 0 | 0 |
-| retry everything ×3 | 43.3% | 10,69,350 | 577 | 26 | 57 |
-| retry everything, 24h backoff | 61.7% | 15,24,425 | 475 | 26 | 57 |
-| **Reclaim** | **66.1%** | **16,32,902** | 545 | 3 | 1 |
-| **Reclaim (strict)** | 65.9% | 16,28,968 | 522 | **0** | **0** |
+**14 safety properties, verified exhaustively.** Full enumeration is ~10⁸ states,
+so the checker uses a soundness argument instead: the kernel only ever *subtracts*
+actions, so a property holding in the most-permissive completion holds in every
+completion. Monotonicity underpins that and is checked, not assumed.
 
-**+7.1% net revenue over the best baseline, with compliance violations down from 26 to 0.**
+**Mutation testing.** Eight rules are deliberately broken one at a time — an
+off-by-one in a cap, a window trimmed, a code dropped — and the verifier must
+notice. **10/10 caught**, and the suite goes green again on revert. On the first
+run one mutation *escaped*, because the permissive baseline used `local_hour=12.0`
+— inside the morning peak window — so an unrelated veto masked the bug. That is
+what mutation testing is for.
 
-The policy was tuned on `data/train.jsonl` and never on these rows.
+**Adversarial.** A diagnoser that claims `transient_issuer` at confidence 1.0 for
+every payment, revoked mandates and fraud declines alike:
 
-## The idea
+| diagnoser | kernel | network violations | double-charge exposure |
+|---|---|---|---|
+| honest | off | 0 | **45** |
+| adversarial | off | **7** | 45 |
+| **all diagnosers** | **on** | **0** | **0** |
 
-Most recovery systems are a retry loop with a cron schedule. That is easy to build and it
-quietly loses money in two ways:
+Nothing was tuned to get those zeros. A broken model makes bad *business*
+decisions, and should. It cannot make illegal ones.
 
-1. **It retries the dead.** An expired card or a revoked mandate has a *literal zero* success
-   rate. Every retry is a gateway fee spent on an outcome that cannot happen. The blanket
-   baselines burn 57 of them on this set.
-2. **It retries the forbidden.** Re-charging a payment a risk engine already declined isn't
-   just ineffective, it's a compliance event. The blanket baselines do it 26 times.
+## 3. Recovery — held out, against three baselines
 
-So the work isn't in the retrying. It's in the **diagnosis** — deciding which of six things
-actually went wrong — and then in the **restraint**.
+240 failed payments, ₹21.8 lakh at risk, policy tuned only on train:
 
-The six causes are chosen to be action-distinguishing rather than error-code-shaped:
+| strategy | recovered | net ₹ | breach | risky | wasted | double charges |
+|---|---|---|---|---|---|---|
+| do nothing | 0.0% | 0 | 0 | 0 | 0 | 0 |
+| retry everything ×3 | 39.2% | 7,93,742 | 279 | 30 | 87 | **11** |
+| retry everything, 24h backoff | 62.3% | 12,62,960 | 144 | 30 | 87 | **8** |
+| **Reclaim** | **64.6%** | **13,10,158** | **0** | 9 | 7 | **0** |
+| **Reclaim (strict)** | 64.1% | 13,00,454 | **0** | **0** | **0** | **0** |
 
-| cause | what it means | right move |
+Three columns are counted apart on purpose, because collapsing them is how
+recovery products flatter themselves:
+
+- **breach** — an action the observable facts forbid. The kernel decides it, so
+  the agent is at zero *by construction*. The baselines do not look.
+- **risky** — a recharge on a payment whose true cause was fraud but whose raw
+  reason was `do_not_honour`, which Visa classifies as **retryable**. Not
+  decidable at the time, so not a breach. Strict mode takes it to zero for 0.7%
+  of revenue.
+- **double charges** — re-charging a payment that had already settled. Each one
+  is a customer debited twice for the same purchase.
+
+That last column is the one a payments engineer will care about. A gateway
+timeout does not mean the payment failed; it means nobody told us. The first
+version of this system classified timeouts as transient and retried immediately.
+The kernel now refuses any money action while settlement is unconfirmed and
+issues `RECONCILE` instead — a 10-paise status lookup.
+
+Diagnosis is tiered: a rules table answers **113/240 rows at 1.000 accuracy for
+free**, and the model handles the 127 rows it has never seen at **0.858**, where a
+rules-only system scores 0.000 by construction.
+
+## 4. Causal measurement — the part that is new
+
+The industry reports **gross recovery**. In advertising, where holdouts are
+standard, measured lift runs far below platform-reported numbers. Dunning has not
+had that reckoning. So: use the shield's refusals as the holdout.
+
+Sharp regression discontinuity at the four NPCI peak-window boundaries, on 400k
+mandate debits, graded against a planted ground truth the estimator never sees:
+
+| | value |
+|---|---|
+| gross recovery ("we recover 31% of failed payments") | 0.3092 |
+| naive treated − blocked | +0.0832 |
+| **RD estimate, pooled over 4 boundaries** | **+0.0831 ± 0.0053** |
+| **true effect (hidden from the estimator)** | **+0.0789** |
+
+**Within 5% of truth.** At the 13:00 boundary it lands exactly. And:
+
+> **Gross recovery overstates the real effect by 3.9×. Roughly 74 of every 100
+> "recovered" payments were coming back on their own.**
+
+Validity is checked rather than claimed: placebo cutoffs at hours where no rule
+changes (largest 14% of the real effect, none significant), a McCrary-style
+density check for manipulation (ratios 0.98–1.02), and bandwidth sweeps stable
+across a 12× range.
+
+The first run at 60k events produced a placebo worth **72%** of the real effect.
+That was not a broken design, it was an underpowered one — so `--power` reports
+the volume needed: **~100k events**, below which the honest output is a
+confidence interval and not a point estimate.
+
+## 5. Security — assume injection succeeds
+
+The merchant note is untrusted text feeding a model that influences whether money
+moves. The literature is consistent that injection cannot be reliably prevented,
+so the posture is **containment, not prevention**.
+
+| diagnoser | kernel | steered | compliance breach | business risk |
+|---|---|---|---|---|
+| plain | off | 43/406 | 11 | 51 |
+| plain | on | 43/406 | **0** | 40 |
+| hardened | on | **5/406** | **0** | 4 |
+
+**Injection works** — hardening cuts steering from 43 to 5, not to 0, and keyword
+stuffing still gets through. What the kernel changes is what that buys: breaches
+go to zero, because no sentence in a merchant note edits a decline reason or a
+clock.
+
+The security evaluation also **falsified the containment claim as first written**:
+the kernel only enforced never-retry on card rails, so a fraud decline on UPI had
+no veto at all. Fixed with rail-agnostic rules keyed on raw gateway reasons, plus
+matching verification properties and mutations.
+
+Also: unicode confusable folding (NFKC does not fold Cyrillic `о`), PII redaction
+sized for Indian identifiers — UPI VPAs have no TLD, so the first pattern missed
+every one of them — a hash-chained tamper-evident audit log, and deterministic
+idempotency keys so a redelivered queue message cannot become a second debit.
+
+## 6. Efficiency and scalability
+
+**Diagnosis is a low-cardinality function, so its cost does not scale with
+volume.** 800 events contain 159 distinct `(reason, method, recurring)`
+signatures, and that space is bounded by the gateway's vocabulary:
+
+| events | model calls needed | cache hit rate |
 |---|---|---|
-| `transient_issuer` | bank blipped | retry, immediately |
-| `insufficient_funds` | no money *yet* | retry **later** — timing is the entire lever |
-| `auth_friction` | customer abandoned OTP | a silent retry can't fix this; ask them |
-| `instrument_invalid` | card/VPA/mandate is dead | never retry; request a new instrument |
-| `limit_exceeded` | daily cap hit | wait for the reset, or switch method |
-| `risk_declined` | fraud block | **never** auto-retry; escalate to a human |
+| 1,000,000 | ≤ 159 | ≥ 99.98% |
+| 50,000,000 | ≤ 159 | ≥ 99.9997% |
 
-## Where the AI actually sits
+Cost is `O(distinct signatures)`, not `O(events)`. With the rules table absorbing
+50% of rows unaided, 50M failed payments a year needs a model budget in the low
+hundreds of calls. Per-event LLM inference is the obvious mistake here.
 
-Behind a lookup table, not in front of it. A model doesn't need to classify `card_expired`.
+*Caveat:* free-text notes are high-cardinality and bypass the cache, so real hit
+rates land below that ceiling.
 
-- **Rules layer** — exact match on failure reasons we've seen. Free, instant, perfectly
-  auditable. Scores **1.000 on 119/240 rows** and returns `UNKNOWN` rather than guessing.
-- **Model layer** — handles what the table has never seen, and the ambiguous declines where
-  the merchant's free-text note contradicts the error code. Scores **0.876 on the 121 rows
-  the rules layer can't touch**, where a rules-only system scores 0.000 by construction.
+Two more properties fall out of the constraint work. Autopay can only fire in
+three windows a day, so the natural architecture is a **scheduler draining a queue
+into legal windows** — the compliance constraint and the efficient architecture
+turn out to be the same design. And capacity allocation is a knapsack, not a
+filter; `p × value` is the greedy ratio heuristic, near-optimal until per-customer
+contact caps couple the items together. That coupling is the honest next problem.
 
-That split is the point: the model is spent only where the cheap path genuinely fails, and
-its accuracy is measured *on exactly those rows* rather than diluted into an overall number.
+## 7. What is wrong with this
 
-`ClaudeDiagnoser` calls the real API; `MockLLMDiagnoser` is a keyword-and-context stand-in so
-that the eval runs offline with no key. **The reported numbers are the mock's** — see
-Honesty below.
-
-### The hard rows
-
-24% of the dataset carries a deliberately ambiguous reason — `do_not_honour`,
-`transaction_not_permitted`, `debit_declined`. These are real codes, and they're ambiguous in
-production too: an issuer declines without saying why, and it can mean no money, a dead card,
-or a fraud rule. The surface string cannot resolve them. Sometimes the merchant note can.
-Often nothing can — and then the honest answer is to escalate rather than guess with
-somebody's money.
-
-## Every action is bounded and gated
-
-`policy.py` separates *what we'd like to do* (`propose`) from *what we're allowed to do*
-(`apply_guardrails`). Guardrails can only ever **weaken** an action, never strengthen one, so
-there is a single place to audit and a single place for a compliance reviewer to read.
-
-Eight gates, most-severe first: risk declines are never auto-retried · dead instruments are
-never retried · money never moves on a low-confidence diagnosis · a 3-attempt budget · a
-2-outreach budget · quiet hours 21:00–09:00 defer outreach rather than cancel it · payments
-too small for a human review stop instead · and a final expected-value gate that refuses any
-action whose believed recovery can't cover its own cost.
-
-Every decision records *why*, and every veto records itself in `blocked_by` — so the trail
-shows not just what the agent did, but what it was **stopped** from doing:
-
-```
-$ python3 eval/run_eval.py --audit pay_2026082000754
-
-payment pay_2026082000754   INR 669.55   upi  [recurring]
-gateway said: BAD_REQUEST_ERROR / token_deprovisioned
-merchant note: customer closed that bank account last month
-
-  attempt 1: request_instrument_update via sms
-      diagnosed instrument_invalid (llm, confidence 0.78)
-      why: instrument is permanently dead; retrying cannot succeed, asking for a new one
-  attempt 3: stop
-      GUARDRAIL: outreach_budget_exhausted
-
-  outcome: not recovered   spent INR 0.30
-```
-
-That payment is a **loss**, on purpose. We spent 30 paise establishing that ₹669 was
-unrecoverable and then stopped. A blanket retry loop spends 6 rupees discovering the same
-thing three times over.
-
-## Honesty
-
-Things that are wrong with this, stated before you find them:
-
-**Detection ground truth is a counterfactual we invented.** `would_self_recover` is knowable
-in a simulator and never knowable in production — you cannot observe what a customer would
-have done if you had left them alone. The real-world version of this label needs a holdout:
-withhold intervention from a random slice, and measure the difference. That experiment design
-is the honest answer, and it is what I would build first with real traffic.
-
-**The world model is synthetic.** No student has live retry outcomes, so success is drawn
-from a hand-specified table in `simulator.py`. Two things keep the comparison from being
-circular: that table is **not** the table the policy believes (`policy.BELIEVED_SUCCESS` is
-deliberately different — an agent that has the world memorised isn't an agent), and every
-strategy faces the **identical** random draw for a given payment and attempt, so differences
-are differences in decisions, not luck.
-
-**The ranking is not robust everywhere.** `--sensitivity` re-runs under ±30% error in the
-world model, and the agent **loses to blanket 24h backoff at +15% and +30%**. That's the
-honest read: when retries succeed far more often than modelled, the cheapest way to recover
-money really is to retry everything. The agent's edge is largest exactly where recovery is
-hard. What that column doesn't price is the 26 compliance violations and 57 dead-instrument
-retries the baseline commits to get there — which is why the headline table carries those
-columns next to the money.
-
-**The guardrail has a hole, and it's measured.** The "never retry a risk decline" gate keys
-off the *diagnosed* cause, so a misdiagnosed ambiguous decline still slips through — 3 times
-on this set. Strict mode refuses to move money below 0.60 confidence and takes that to 0, for
-₹3,935 (−0.2%) of recovered revenue. Which point on that curve is right is a risk-appetite
-decision, not an engineering one, so both are reported rather than one being quietly chosen.
-
-**The reported diagnosis accuracy is the mock's, not Claude's.** Swapping in
-`ClaudeDiagnoser` and re-running is one flag; that number is not yet in this README because
-it hasn't been measured, and putting an unmeasured number in a metrics table is how you lose
-an interview.
+- **The world model is synthetic.** No student has live retry outcomes. Two things
+  keep it from being circular: the simulator's success table is *not* the table
+  the policy believes, and every strategy faces identical random draws.
+- **Detection ground truth is a counterfactual we invented.** `would_self_recover`
+  is knowable in a simulator and never in production. §4 is the beginning of the
+  real answer, but the production version still needs a deliberate holdout to
+  validate against.
+- **The RD estimand is local.** It measures the effect on payments near a peak
+  boundary, which is not the average effect across all payments. Treating it as
+  global would be a misreading.
+- **Recovery executes on payment failures only.** Detection covers four surfaces;
+  the diagnose → guardrail → audit spine is surface-agnostic by design, but the
+  policies for carts, mandate sequencing and receivables are not written yet.
+- **Reported diagnosis accuracy is the offline stand-in's, not Claude's.**
+  `ClaudeDiagnoser` calls the real API; that number is not in this README because
+  it has not been measured, and an unmeasured number in a metrics table is how you
+  lose an interview.
+- **The residual `risky` column cannot reach zero** without strict mode, and
+  strict mode costs revenue. That is a risk-appetite decision, not a bug.
 
 ## Layout
 
 ```
-reclaim/surfaces.py     the four loss surfaces and what they share
-reclaim/detect.py       candidate extraction, features, logistic regression, rankers
-data/events.py          30-day raw merchant event stream with counterfactual labels
-eval/run_detect_eval.py detection: AUC per surface, capacity-constrained ranking
-reclaim/models.py       domain types; costs in rupees
-reclaim/diagnose.py     rules table, LLM diagnosers, tiered fallback
-reclaim/policy.py       propose() -> apply_guardrails(); all tunables in one block
-reclaim/simulator.py    ground-truth world model + common random numbers
-reclaim/agent.py        the recovery loop, and the three baselines
-data/generate.py        deterministic synthetic dataset with planted hard cases
-eval/run_eval.py        held-out scoring, per-class P/R, sensitivity, audit trail
+reclaim/compliance.py   the kernel: facts in, legal action set out
+reclaim/verify.py       14 machine-checked safety properties
+reclaim/causal.py       sharp RD, robust SEs, placebo and density checks
+reclaim/security.py     injection detection, PII redaction, hash-chained log
+reclaim/detect.py       candidate extraction, features, logistic regression
+reclaim/diagnose.py     rules table, LLM tier, hardened tier
+reclaim/policy.py       legality first, then intent, then business policy
+reclaim/agent.py        the recovery loop and three baselines
+reclaim/simulator.py    ground-truth world model, common random numbers
+data/                   deterministic generators for all three datasets
+eval/                   seven suites; run_all.sh runs them in order
+docs/RESEARCH.md        the regulation, with sources, and ten edge cases
 ```
+
+Sources for every constraint cited above are in [docs/RESEARCH.md](docs/RESEARCH.md).
