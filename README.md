@@ -251,6 +251,36 @@ output is an interval, not a point estimate.
 The merchant note is untrusted text feeding a model that influences whether money
 moves. Injection cannot be reliably prevented, so the posture is containment.
 
+### The review found three real defects
+
+**High — merchant text reached the model unredacted.** Redaction and injection
+screening lived in `HardenedDiagnoser`, a *wrapper*. But `ClaudeDiagnoser` is the
+only path that actually leaves the process, and it could be constructed directly,
+bypassing all of it. A control you can skip by choosing a different constructor
+is not a control. Moved into `_build_user_prompt` — the single place a prompt is
+assembled — so no caller can route around it.
+
+**High — the orchestrator fabricated a compliance fact.** `_observe` hardcoded
+`hours_since_pre_debit_notice=25.0`, asserting an RBI pre-debit notice existed
+without checking. That defeats the premise the entire kernel rests on: every
+field it reads is *observed*, not believed. A fabricated fact defeats a proof
+about facts, and this one would have authorised mandate retries RBI does not
+permit. Now read from the event, defaulting to "no notice".
+
+**Medium — audit truncation was invisible.** Chaining catches edits and
+reordering, but deleting the tail leaves a chain that verifies perfectly. Added
+`checkpoint()` / `verify(expected)`, and documented that detection needs an
+anchor from outside the log rather than pretending chaining suffices.
+
+Also: customer identifiers in the audit log are now HMAC-pseudonymised (stable,
+so a reviewer can still follow one customer through it), and the system reports
+whether real keying is in force rather than implying it.
+
+**Checked and clean:** no ReDoS in the PII or injection patterns (linear scaling
+on adversarial input), exception *messages* never logged — only types, since
+client errors can carry URLs and tokens — no secrets stored or serialised, no
+`eval`/`exec`, no unsafe deserialisation.
+
 | diagnoser | kernel | steered | compliance breach | business risk |
 |---|---|---|---|---|
 | plain | off | 43/406 | 11 | 51 |
@@ -277,6 +307,11 @@ payments.
 |---|---|---|---|
 | strict (note bypasses cache) | 116 | 617 | 22.9% |
 | **note folded into key** | 337 | 337 | **57.9%** |
+
+Since the learned tier landed, this matters much less: the classifier absorbs
+52% of all payments and model calls fall to roughly **1 in 240**. The caching
+analysis is kept because it is still the right answer for the residual, and
+because the correction below is the more instructive part.
 
 The README previously projected ≥99.98%. Measuring it gave **22.9%** — 63% of
 payments carry a note and every one bypassed the cache. The projection was a
