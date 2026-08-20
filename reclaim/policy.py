@@ -222,6 +222,19 @@ def propose_by_ev(p: FailedPayment, dx: Diagnosis, st: RecoveryState,
     attempt = st.money_attempts + st.outreach_count + 1
     options: list[tuple[float, Action, Channel, int]] = []
 
+    # ESCALATE_MANUAL is deliberately NOT a candidate here, and the reason is
+    # worth stating because adding it looks obviously right.
+    #
+    # It recovers about one payment in five, so on a myopic single-step
+    # comparison it beats a weak first retry and gets chosen. But escalation
+    # ENDS the workflow -- a human owns the payment and the agent stops -- so
+    # choosing it forfeits every remaining attempt, including the scheduled
+    # retry at 48h that converts insufficient-funds failures at 45%. Measured:
+    # putting it in the candidate set moved recovery from 65.7% to 60.9%.
+    #
+    # Greedy expected value is only correct when the actions being compared have
+    # the same continuation value. These do not. Escalation stays where propose()
+    # puts it: the thing you do when nothing else is permitted.
     for action in sorted(allowed & (MONEY_ACTIONS | OUTREACH_ACTIONS),
                          key=lambda a: a.value):
         if action in st.tried and action is not Action.RETRY_SCHEDULED:

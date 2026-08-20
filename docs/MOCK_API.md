@@ -6,7 +6,7 @@ JSON parsing, idempotency keys — is exercised whether it is talking to Razorpa
 to a hosted mock, or to a local one.
 
 ```bash
-RECLAIM_API_BASE=<base-url> ./serve.py --gateway razorpay
+RECLAIM_API_BASE=<base-url> ./bin/reclaim run --gateway razorpay
 ```
 
 **A mock is not test mode, and the agent will not pretend otherwise.** Razorpay
@@ -20,7 +20,7 @@ more real than it is.
 ## Option 1 — the local mock (no setup, works offline)
 
 ```bash
-./serve.py --gateway mock --limit 40
+./bin/reclaim run --gateway mock --limit 40
 ```
 
 Starts `tools/mock_razorpay.py` in-process and talks to it over real HTTP on
@@ -31,7 +31,7 @@ To run it standalone:
 
 ```bash
 python3 tools/mock_razorpay.py
-RECLAIM_API_BASE=http://127.0.0.1:8787/v1 ./serve.py --gateway razorpay
+RECLAIM_API_BASE=http://127.0.0.1:8787/v1 ./bin/reclaim run --gateway razorpay
 ```
 
 It answers deterministically from the payment id: ids containing `settled` or
@@ -45,7 +45,7 @@ Sandbox: `https://razorpay-mock-api.proxy.beeceptor.com`
 
 ```bash
 RECLAIM_API_BASE=https://razorpay-mock-api.proxy.beeceptor.com/v1 \
-  ./serve.py --gateway razorpay --limit 20
+  ./bin/reclaim run --gateway razorpay --limit 20
 ```
 
 No credentials needed — a mock authenticates nothing, and requiring real keys to
@@ -121,7 +121,7 @@ the double-charge defence, use the local mock.
 ```bash
 export RAZORPAY_KEY_ID=rzp_test_xxxxxxxx
 export RAZORPAY_KEY_SECRET=xxxxxxxx
-./serve.py --gateway razorpay --limit 20
+./bin/reclaim run --gateway razorpay --limit 20
 ```
 
 Reads are real. `fetch_payment` — which is what `RECONCILE` calls, and the whole
@@ -131,7 +131,7 @@ Writes are gated twice over: `--execute` must be passed, and a key not beginning
 `rzp_test_` is refused unless `RECLAIM_ALLOW_LIVE_KEYS=1` is set. A recovery
 agent that executes by default is one config mistake away from charging people.
 
-`eval/run_realtime_test.py` exercises the full loop against the sandbox:
+`./bin/reclaim live` (`eval/run_realtime_test.py`) exercises the full loop against the sandbox:
 discovers receivables, reconciles their live status, and — with `--execute` —
 sends real reminders through `POST /payment_links/:id/notify_by/:medium`, with
 the compliance kernel deciding whether each call happens at all.

@@ -149,7 +149,7 @@ def main() -> None:
     test = load("test")
     at_risk = sum(p.amount_inr for p in test if not p.settlement_actually_succeeded)
 
-    from reclaim import policy
+    from reclaim import policy, simulator as _sim  # noqa: F401
     from reclaim.agent import ReclaimAgent
     from reclaim.classify import train as train_classifier
     from reclaim.diagnose import ThreeTierDiagnoser
@@ -195,6 +195,69 @@ def main() -> None:
   The remaining {gap:.1%} is the entire prize for perfect diagnosis. It is worth
   INR {lawful['net_inr'] - tuned['net_inr']:,.0f}, and no model can capture all of it, because a model
   that knew every true cause with certainty is what the oracle already is.
+""")
+
+    # --- what is the remaining gap actually made of? -----------------------
+    #
+    # "Improve the model" is the reflex answer to a gap and is usually wrong.
+    # Swapping in perfect diagnosis and true probabilities, one at a time,
+    # attributes the gap instead of guessing at it.
+    from reclaim.diagnose import Diagnosis
+    from reclaim.models import Channel
+
+    class PerfectDiagnoser:
+        name = "perfect"
+        def diagnose(self, p):
+            return Diagnosis(p.true_root_cause, 1.0, "oracle", "true cause")
+
+    class TrueBeliefs:
+        """The simulator's real probabilities behind the belief interface."""
+        payment = None
+        def get(self, cause, action, attempt=1, delay_hours=0):
+            d = Decision(self.payment.payment_id, attempt, cause, "x", 1.0, action,
+                         delay_hours=delay_hours,
+                         channel=(Channel.WHATSAPP if action in OUTREACH_ACTIONS
+                                  else Channel.NONE))
+            return simulator.success_probability(self.payment, d)
+
+    class Tracking(ReclaimAgent):
+        def run(self, p, noise=0.0):
+            if isinstance(policy.BELIEFS, TrueBeliefs):
+                policy.BELIEFS.payment = p
+            return super().run(p, noise)
+
+    policy.set_proposer("ev")
+    grid = {}
+    for dx_label, dx in (("fitted", ThreeTierDiagnoser(learned)),
+                         ("perfect", PerfectDiagnoser())):
+        for b_label, b in (("fitted", beliefs), ("true", TrueBeliefs())):
+            policy.set_beliefs(b)
+            grid[(dx_label, b_label)] = score(Tracking(diagnoser=dx), test)["recovery_rate"]
+    policy.set_proposer("rules")
+    policy.set_beliefs(None)
+
+    base = grid[("fitted", "fitted")]
+    print(f"\n  WHAT THE REMAINING GAP IS MADE OF\n")
+    print(f"  {'diagnosis':<12}{'beliefs':<10}{'recovered':>11}{'vs shipped':>13}")
+    print("  " + "-" * 46)
+    for (d, b), rec in grid.items():
+        print(f"  {d:<12}{b:<10}{rec:>10.1%}{rec - base:>+13.1%}")
+    print(f"  {'oracle':<22}{lawful['recovery_rate']:>10.1%}"
+          f"{lawful['recovery_rate'] - base:>+13.1%}")
+    print("  " + "-" * 46)
+    both = grid[("perfect", "true")]
+    print(f"""
+  Perfect diagnosis is worth {grid[("perfect", "fitted")] - base:+.1%}. True probabilities are worth
+  {grid[("fitted", "true")] - base:+.1%}. Both together are worth {both - base:+.1%} -- and the oracle is
+  {lawful['recovery_rate'] - base:+.1%} ahead, so about {lawful['recovery_rate'] - both:.1%} of the gap is NEITHER.
+
+  That residual is the business policy declining on purpose: payments too small
+  to justify an analyst, actions whose expected recovery cannot cover their own
+  cost. It is not error to be tuned away. Closing it would mean spending money
+  to recover less of it.
+
+  Which is the honest end of the tuning road: the modelling is within {max(grid[("perfect", "fitted")] - base, grid[("fitted", "true")] - base):.1%} of
+  perfect, and what is left is a deliberate decision about what is worth chasing.
 """)
 
     # --- where the rest of the money is ------------------------------------

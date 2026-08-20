@@ -43,7 +43,10 @@ PRIOR_BETA = 1.0
 # hand-written value; the pair is reported and left alone.
 MIN_OBSERVATIONS = 25
 
-EXPLORABLE = MONEY_ACTIONS | OUTREACH_ACTIONS
+# Escalation is explored so a belief exists for it, but policy.propose_by_ev does
+# not put it in the candidate set -- it terminates the workflow, and comparing it
+# myopically against actions that do not is what made recovery worse when tried.
+EXPLORABLE = MONEY_ACTIONS | OUTREACH_ACTIONS | {Action.ESCALATE_MANUAL}
 
 # Delay buckets for scheduled retries. Timing is the whole lever on funds and
 # limit failures, so an estimate that averages over "some delay" answers a

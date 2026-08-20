@@ -35,7 +35,7 @@ Two of these directly contradicted what v1 of this system did:
 
 1. **Unconfirmed settlement.** A gateway timeout does not mean the payment
    failed. It means nobody told us. v1 classified timeouts as `transient_issuer`
-   and retried *immediately* — measured at **45 double-charge exposures out of
+   and retried *immediately* — measured at **35 double-charge exposures out of
    240 payments**. This is the most serious defect the research turned up, and no
    amount of model accuracy would have found it, because the model was right.
 2. **Category 1 is a first-strike rule.** An attempt budget of 3 is irrelevant
@@ -113,15 +113,34 @@ belongs — as an expected-value question the model is allowed to be wrong about
 **Diagnosis is a low-cardinality function, so its cost does not scale with
 volume.** Measured on our own data:
 
-| events | distinct `(reason, method, recurring)` signatures | model calls needed | cache hit rate |
+> **Corrected.** This section originally projected a ≥99.98% hit rate from 159
+> distinct `(reason, method, recurring)` signatures. Measuring it gave **22.9%**:
+> 63% of payments carry a merchant note, and the strict cache key excluded notes,
+> so every noted payment bypassed the cache. The projection was a bound on
+> note-free traffic quoted as though it were the rate. Folding a normalised note
+> into the key — case and whitespace only, nothing semantic — takes it to 57.9%
+> on this data, across 337 distinct signatures.
+
+| cache key | distinct signatures | calls | measured hit rate |
 |---|---|---|---|
-| 800 | 159 | 159 | 80.1% |
-| 10,000 | ≤ 159 | ≤ 159 | ≥ 98.4% |
-| 1,000,000 | ≤ 159 | ≤ 159 | ≥ 99.98% |
-| 50,000,000 | ≤ 159 | ≤ 159 | ≥ 99.9997% |
+| strict (note bypasses cache) | 116 | 617 | 22.9% |
+| **note folded into key** | 337 | 337 | **57.9%** |
+
+Projected forward from 337 signatures, assuming note text keeps recurring rather
+than being freshly written every time:
+
+| events | model calls | hit rate |
+|---|---|---|
+| 10,000 | ≤ 337 | ≥ 96.6% |
+| 1,000,000 | ≤ 337 | ≥ 99.97% |
+| 50,000,000 | ≤ 337 | ≥ 99.999% |
 
 Cost is `O(distinct signatures)`, not `O(events)` — the signature space is
 bounded by the gateway's own vocabulary and grows only when a network adds a code.
+Since this was written a learned classifier has been added between the rules
+table and the model, and it absorbs 53% of all payments on its own — model calls
+on the held-out set fall to **zero**. See §5 of the README.
+
 Combined with the rules table already absorbing **50%** of rows with no model at
 all, a merchant doing 50M failed payments a year needs a model budget in the low
 hundreds of calls. Per-event LLM inference here would be a straightforward

@@ -3,7 +3,7 @@
 <p align="center">
 <a href="#the-one-paragraph-version"><img src="https://img.shields.io/badge/track-AI%20Revenue%20Recovery-0C2451?style=for-the-badge" alt="Track"></a>
 <a href="#1-the-compliance-kernel"><img src="https://img.shields.io/badge/safety%20properties-19%20machine--checked-2E7D32?style=for-the-badge" alt="Verified"></a>
-<a href="#why-658-and-not-100"><img src="https://img.shields.io/badge/of%20achievable%20ceiling-95%25-1565C0?style=for-the-badge" alt="Ceiling"></a>
+<a href="#why-668-and-not-100"><img src="https://img.shields.io/badge/of%20achievable%20ceiling-97%25-1565C0?style=for-the-badge" alt="Ceiling"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT"></a>
 <a href="#running-it"><img src="https://img.shields.io/badge/dependencies-none-6A1B9A?style=for-the-badge" alt="Zero dependencies"></a>
 </p>
@@ -25,7 +25,7 @@ Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 | **Cannot break the rules, provably** | 19 safety properties machine-checked exhaustively over the discretised state space. The compliance kernel reads **no model output**, so a diagnosis that is confidently wrong still cannot unlock an illegal action. An adversarial diagnoser lying at confidence 1.0 on every payment produces **zero** breaches. |
 | **Measures what it caused, not what it claims** | The industry reports gross recovery. A regression discontinuity at NPCI's peak-window boundaries — a randomised experiment regulation runs for free — shows gross **overstates real lift by 3.9×**. About 74 of every 100 "recovered" payments were coming back anyway. |
 | **Four surfaces, one queue** | Failed payments, mandate cycles, abandoned carts, overdue invoices — one kernel, one contact ledger, one capacity queue, one audit chain. Receivables crowd out carts at small budgets, which no per-surface team can see. |
-| **Knows its own ceiling** | An oracle with perfect knowledge reaches 68.9%. Reclaim reaches 65.7% — **95% of everything available**. 21% of the money is on instruments that cannot be charged by anyone. |
+| **Knows its own ceiling** | An oracle with perfect knowledge reaches 68.9%. Reclaim reaches **66.8% — 97% of everything available**, and perfect diagnosis would add only **+0.1%**. 21% of the money is on instruments that cannot be charged by anyone. |
 | **Real gateway, real latency** | Runs against Razorpay test mode: reconciles live status, sends real reminders, and the kernel refuses at 22:00 so **no HTTP request is issued at all**. Decisions in ~7µs; a gateway round trip is ~230,000× slower, which is the whole argument for the tiering. |
 | **Assumes injection succeeds** | Merchant notes are untrusted text feeding a model that influences money. Hardening cuts steering from 43/406 to 5/406 — not to zero, and the README says so. What the kernel changes is that breaches go to zero regardless. |
 | **Honest about what is wrong** | Two tuning results were negative. The receivables ladder adds nothing measurable. The classifier is confidently wrong on `payment_failed`. All in the README body, not buried. |
@@ -40,7 +40,7 @@ figures, which come from `./bin/reclaim live` against a test-mode sandbox.
 
 ## Running it
 
-`serve.py` is the agent as a deployable process, not another evaluation. It takes
+`./bin/reclaim run` is the agent as a deployable process, not another evaluation. It takes
 one event at a time, decides, acts through a gateway, and prints what it did —
 **including everything it refused to do**, because a recovery agent's refusals are
 the interesting half.
@@ -96,7 +96,7 @@ Saying that plainly beats a demo that implies more than it does.
 
 ### Verified against Razorpay test mode
 
-`eval/run_realtime_test.py` runs the agent against Razorpay's real sandbox — real
+`./bin/reclaim live` runs the agent against Razorpay's real sandbox — real
 objects, real HTTP, real latency, and with `--execute`, a real reminder leaving
 the building through Razorpay's own notify API.
 
@@ -244,8 +244,67 @@ those zeros.
 | retry everything ×3 | 39.2% | 7,93,742 | 279 | 30 | 87 | **11** |
 | retry, 24h backoff | 62.3% | 12,62,960 | 144 | 30 | 87 | **8** |
 | **Reclaim** | 64.6% | 13,10,158 | **0** | 9 | 7 | **0** |
-| **Reclaim (tuned)** | **65.7%** | **13,32,307** | **0** | 9 | 18 | **0** |
+| **Reclaim (tuned)** | **66.8%** | **13,55,663** | **0** | 9 | 20 | **0** |
 | **Reclaim (strict)** | 64.1% | 13,00,454 | **0** | **0** | **0** | **0** |
+
+### Why 66.8% and not 100%
+
+Recovery rate is not an accuracy score that better tuning pushes toward 1.0. It
+is the share of at-risk money that comes back, and most of what bounds it is a
+property of the payments. `reclaim eval ceiling` measures that bound with an
+oracle: an agent that **knows the true cause of every payment**, picks the
+best-performing legal action every time, and spends every attempt the rules
+allow. Nothing real can beat it.
+
+| agent | recovered | breaches |
+|---|---|---|
+| **Reclaim (tuned)** | **66.8%** | **0** |
+| oracle, obeying the rules | **68.9%** | 0 |
+| oracle, ignoring every rule | 75.5% | 6 |
+
+**Reclaim is at 97% of everything available**, and the remaining gap decomposes
+to almost nothing worth chasing:
+
+| diagnosis | beliefs | recovered | vs shipped |
+|---|---|---|---|
+| fitted | fitted | 66.8% | — |
+| **perfect** | fitted | 66.8% | **+0.1%** |
+| fitted | **true probabilities** | 66.8% | **+0.1%** |
+| **perfect** | **true** | 66.9% | **+0.1%** |
+| oracle | oracle | 68.9% | +2.1% |
+
+Perfect diagnosis is worth **+0.1%**. Knowing the true success probability of
+every action is worth **+0.1%**. Both together, **+0.1%**. The modelling is
+within a tenth of a point of perfect — **there is nothing left for a better
+model to buy.**
+
+The other **2.0%** is neither: it is the business policy declining on purpose —
+payments too small to justify an analyst, actions whose expected recovery cannot
+cover their own cost. That is not error to be tuned away. Closing it would mean
+spending money to recover less of it.
+
+And an oracle that *cheats* — retrying fraud declines, breaching network caps,
+contacting people at 3am — still reaches only 75.5%. **100% is ~24 points out of
+reach for a system with omniscience and no law**, because:
+
+| | count | ₹ | share |
+|---|---|---|---|
+| cannot be charged at all (best legal charge = 0%) | 60 | 4,28,258 | **21.1%** |
+| best legal charge under 25% | 63 | 7,11,301 | 35.0% |
+| best legal charge 25–60% | 93 | 8,40,917 | 41.4% |
+| best legal charge over 60% | 18 | 49,635 | 2.4% |
+
+A revoked mandate or a cancelled card has a success probability of **exactly
+zero** — it cannot be charged by anyone, at any price, with any model. A risk
+decline must not be retried at all. That is 21% of the money before anyone
+writes a line of policy.
+
+So 100% is not a target that tuning approaches. It is a number you can only
+report by counting things that did not happen — precisely what `retry_all_x3`
+does when it books 11 double charges as recovered revenue, and what the industry
+does when it reports gross recovery that overstates real lift by 3.9×.
+
+---
 
 Three columns kept apart on purpose. A **breach** is an action the observable
 facts forbid — the kernel decides it, so the agent is at zero by construction.
@@ -346,7 +405,7 @@ time". Conditioning fixed it.
 | rules ladder | hand-written | 64.6% | 13,10,158 |
 | rules ladder | fitted | 64.6% | 13,10,158 |
 | EV | hand-written | 54.2% | 10,99,529 |
-| **EV** | **fitted** | **65.7%** | **13,32,307** |
+| **EV** | **fitted** | **66.8%** | **13,55,663** |
 
 Fitting alone changes **nothing**, because under the rules ladder nothing
 consults the beliefs — the EV gate only fires on payments too small to chase, so
@@ -523,7 +582,7 @@ reclaim/policy.py       legality first, then intent, then business policy
 reclaim/orchestrator.py one queue, one ledger, one audit chain
 reclaim/service.py      the agent as a deployable process
 reclaim/gateway.py      Razorpay test-mode client, and a stand-in
-serve.py                run it live
+serve.py                the live runner behind `reclaim run`
 tools/mock_razorpay.py  a Razorpay stand-in over real HTTP
 bin/reclaim             the CLI: doctor, run, live, eval, test
 reclaim/config.py       layered config; secrets from the environment only
