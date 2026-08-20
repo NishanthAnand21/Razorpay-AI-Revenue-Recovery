@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 n=0
-total=21
+total=22
 step() { n=$((n+1)); printf '\n\033[1m===  %d/%d  %s  ===\033[0m\n\n' "$n" "$total" "$1"; }
 
 step "generate data"
@@ -14,6 +14,7 @@ python3 data/panel.py
 python3 data/cycles.py
 python3 data/receivables.py
 
+step "doctor";                       ./bin/reclaim doctor
 step "regression tests";             python3 tests/test_all.py
 step "verify the compliance kernel"; python3 eval/run_verification.py
 step "mutation-test the verifier";   python3 eval/run_mutation.py

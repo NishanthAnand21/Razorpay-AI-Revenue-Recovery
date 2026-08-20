@@ -449,6 +449,45 @@ def a_missing_mock_rule_produces_a_named_error():
         httpd.shutdown()
 
 
+@test
+def the_cli_dispatches_and_forwards_flags():
+    """argparse.REMAINDER swallowed leading options, so this is pinned.
+
+    `reclaim run --limit 3` failed while `reclaim run 3` worked -- the kind of
+    bug that only shows up when somebody other than the author tries it.
+    """
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    exe = [sys.executable, str(root / "bin" / "reclaim")]
+
+    r = subprocess.run(exe + ["run", "--limit", "3"], capture_output=True, text=True)
+    eq(r.returncode, 0, f"run --limit failed: {r.stderr[:200]}")
+    eq(r.stdout.count("pay_"), 3, "flag was not forwarded: ")
+
+    eq(subprocess.run(exe + ["doctor"], capture_output=True).returncode, 0,
+       "doctor failed: ")
+    eq(subprocess.run(exe + ["eval", "nosuchsuite"], capture_output=True).returncode,
+       1, "an unknown suite should exit 1: ")
+    eq(subprocess.run(exe + ["badcmd"], capture_output=True).returncode, 1,
+       "an unknown command should exit 1: ")
+    eq(subprocess.run(exe, capture_output=True).returncode, 0,
+       "bare invocation should print help and exit 0: ")
+
+
+@test
+def config_refuses_secrets_from_a_file():
+    """A warning that still loads the secret teaches the wrong lesson."""
+    import tempfile
+    from reclaim.config import load
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+        fh.write('[razorpay]\nkey_secret = "leaked"\n[gateway]\nmode = "mock"\n')
+        path = Path(fh.name)
+    cfg = load(path)
+    ok(not any("secret" in k for k in cfg.values), "a secret was loaded from a file")
+    ok(cfg.warnings, "loading a secret produced no warning")
+    eq(cfg.get("gateway.mode"), "mock", "non-secret settings should still load: ")
+
+
 # --- determinism -------------------------------------------------------------
 
 @test

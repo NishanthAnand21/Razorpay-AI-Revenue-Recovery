@@ -1,0 +1,22 @@
+# Reclaim configuration. Every value here is a default you can override with a
+# flag; `reclaim config` shows which layer each setting came from.
+#
+# Secrets are deliberately NOT configurable here -- RAZORPAY_KEY_ID and
+# RAZORPAY_KEY_SECRET are read from the environment only, and putting them in
+# this file is refused rather than warned about.
+
+[gateway]
+mode = "simulated"        # simulated | mock | razorpay
+allow_writes = false      # writes stay off until asked for, explicitly
+
+[service]
+dry_run = true            # an agent that executes by default is one config
+                          # mistake away from charging people
+limit = 60
+
+[policy]
+proposer = "rules"        # rules | ev  (ev needs fitted beliefs)
+strict = false            # strict refuses to move money below 0.60 confidence
+
+[diagnosis]
+use_learned_tier = true

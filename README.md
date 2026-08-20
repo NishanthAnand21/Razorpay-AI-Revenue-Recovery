@@ -1,4 +1,12 @@
-# Reclaim
+# Reclaim ₹
+
+<p align="center">
+<a href="#the-one-paragraph-version"><img src="https://img.shields.io/badge/track-AI%20Revenue%20Recovery-0C2451?style=for-the-badge" alt="Track"></a>
+<a href="#1-the-compliance-kernel"><img src="https://img.shields.io/badge/safety%20properties-19%20machine--checked-2E7D32?style=for-the-badge" alt="Verified"></a>
+<a href="#why-658-and-not-100"><img src="https://img.shields.io/badge/of%20achievable%20ceiling-95%25-1565C0?style=for-the-badge" alt="Ceiling"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT"></a>
+<a href="#running-it"><img src="https://img.shields.io/badge/dependencies-none-6A1B9A?style=for-the-badge" alt="Zero dependencies"></a>
+</p>
 
 **A revenue-recovery agent that cannot break the rules, and that measures what it
 actually caused rather than what it took credit for.**
@@ -6,19 +14,27 @@ actually caused rather than what it took credit for.**
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-./serve.py --rate 4 --limit 40    # watch the agent run, live
-./run_all.sh                      # 20 suites, ~2 minutes, no internet needed
+./bin/reclaim doctor              # is this machine set up?
+./bin/reclaim run --rate 4        # watch the agent work, live
+./bin/reclaim live --execute      # against real Razorpay test mode
+./bin/reclaim eval                # 22 suites of evidence, ~2 minutes
 ```
 
+| | |
+|---|---|
+| **Cannot break the rules, provably** | 19 safety properties machine-checked exhaustively over the discretised state space. The compliance kernel reads **no model output**, so a diagnosis that is confidently wrong still cannot unlock an illegal action. An adversarial diagnoser lying at confidence 1.0 on every payment produces **zero** breaches. |
+| **Measures what it caused, not what it claims** | The industry reports gross recovery. A regression discontinuity at NPCI's peak-window boundaries — a randomised experiment regulation runs for free — shows gross **overstates real lift by 3.9×**. About 74 of every 100 "recovered" payments were coming back anyway. |
+| **Four surfaces, one queue** | Failed payments, mandate cycles, abandoned carts, overdue invoices — one kernel, one contact ledger, one capacity queue, one audit chain. Receivables crowd out carts at small budgets, which no per-surface team can see. |
+| **Knows its own ceiling** | An oracle with perfect knowledge reaches 68.9%. Reclaim reaches 65.7% — **95% of everything available**. 21% of the money is on instruments that cannot be charged by anyone. |
+| **Real gateway, real latency** | Runs against Razorpay test mode: reconciles live status, sends real reminders, and the kernel refuses at 22:00 so **no HTTP request is issued at all**. Decisions in ~7µs; a gateway round trip is ~230,000× slower, which is the whole argument for the tiering. |
+| **Assumes injection succeeds** | Merchant notes are untrusted text feeding a model that influences money. Hardening cuts steering from 43/406 to 5/406 — not to zero, and the README says so. What the kernel changes is that breaches go to zero regardless. |
+| **Honest about what is wrong** | Two tuning results were negative. The receivables ladder adds nothing measurable. The classifier is confidently wrong on `payment_failed`. All in the README body, not buried. |
+
 Python 3.11+. Nothing to install, nothing to configure, no internet. Verified
-from a clean clone: 20 suites, 29 tests, 12/12 mutations, all green.
+from a clean clone: 22 suites, 31 tests, 12/12 mutations, all green.
 
-Every number below is produced by `run_all.sh`, except the Razorpay figures,
-which come from `eval/run_realtime_test.py` against a live test-mode sandbox.
-
-Most of the runtime is one suite: leave-one-reason-out trains 25 classifiers from
-scratch to test how the diagnoser behaves on failure reasons it has never seen.
-That is the check that keeps the accuracy claim honest, so it stays.
+Every number below is produced by `./bin/reclaim eval`, except the Razorpay
+figures, which come from `./bin/reclaim live` against a test-mode sandbox.
 
 ---
 
@@ -509,7 +525,10 @@ reclaim/service.py      the agent as a deployable process
 reclaim/gateway.py      Razorpay test-mode client, and a stand-in
 serve.py                run it live
 tools/mock_razorpay.py  a Razorpay stand-in over real HTTP
-tests/test_all.py       29 regression tests, no test framework required
+bin/reclaim             the CLI: doctor, run, live, eval, test
+reclaim/config.py       layered config; secrets from the environment only
+reclaim.toml            defaults, overridable by flag
+tests/test_all.py       31 regression tests, no test framework required
 docs/RESEARCH.md        the regulation, with sources, and ten edge cases
 ```
 
