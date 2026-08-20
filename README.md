@@ -1,19 +1,88 @@
 # Reclaim
 
-**An agent that recovers failed payments — and knows which ones not to touch.**
+**An agent that finds revenue slipping away across four surfaces, decides who is worth
+chasing under a real capacity budget, and runs a bounded recovery workflow — with an audit
+trail for every rupee it moves and every action it refused to take.**
 
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-python3 data/generate.py      # regenerate the dataset (deterministic)
-python3 eval/run_eval.py      # reproduce every number below
+python3 data/events.py             # 30-day raw merchant event stream
+python3 data/generate.py           # failed-payment dataset
+python3 eval/run_detect_eval.py    # stage 1: what is slipping away, and who is worth chasing
+python3 eval/run_eval.py           # stage 2: recovery, vs three baselines
 ```
 
 No dependencies. Python 3.11+. The whole evaluation runs in under a second.
 
 ---
 
-## The claim
+## Stage 1 — detection
+
+Revenue does not usually announce itself as it leaves. A failed payment does, but a stalled
+checkout emits **nothing at all**, and an invoice going bad looks exactly like one that has
+not come due yet. So the pipeline starts from a raw 30-day event stream — 1,580 events, most
+of them perfectly fine — and has to find the 687 stalls in it across four surfaces.
+
+The target label is not "did this stall" but **`is_worth_chasing`: at risk AND not going to
+fix itself.** Roughly half of all stalls self-recover — the customer comes back, tops up the
+balance, pays the invoice late but pays it. Chasing them is not a win. It is a message nobody
+wanted, and on a big enough base it costs more than the revenue it claims to save. Recovery
+dashboards book those as recovered revenue. They aren't.
+
+That makes detection ground truth **counterfactual**, which is the genuinely hard part.
+
+### The signal is not evenly distributed
+
+| surface | stalls (test) | base rate | **AUC** |
+|---|---|---|---|
+| subscription | 31 | 0.84 | **0.862** |
+| receivable | 76 | 0.21 | **0.710** |
+| checkout abandonment | 95 | 0.57 | **0.531** |
+| all | 202 | 0.48 | 0.779 |
+
+Read that column before believing any money number below it.
+
+Abandoned carts are **barely better than a coin flip**, and training to convergence does not
+move it — this is a feature ceiling, not underfitting. Session metadata simply does not know
+whether someone meant to buy. That is a finding, not a failure: the industry default is to
+blanket-message every abandoned cart, and this says those messages are close to untargeted.
+Either get features that carry intent, or stop spending capacity there. Do not dress up a
+0.53 AUC as personalisation.
+
+### Cost is not the constraint. Capacity is.
+
+The first version of this eval picked a threshold on expected value, and the optimum came out
+at *chase everything* — with a WhatsApp nudge at 70 paise against a cart worth thousands,
+almost any flag is EV-positive. That result is kept in the repo because it says something
+real: intervention **cost** is not what makes detection hard.
+
+Capacity is. A collections team makes a bounded number of calls a month. So the honest
+problem is not "which items clear a value bar" but **given room for K interventions, which K** —
+a ranking problem, where precision at the top is the whole game.
+
+| budget | ranker | prec@K | net ₹ |
+|---|---|---|---|
+| 20 | biggest amounts first | 0.05 | 2,08,176 |
+| 20 | **model probability × value** | 0.30 | **7,78,414** |
+| 50 | biggest amounts first | 0.18 | 12,42,860 |
+| 50 | **model probability × value** | 0.22 | **13,33,597** |
+| 100 | biggest amounts first | 0.32 | **14,83,585** |
+| 100 | model probability × value | 0.33 | 14,69,552 |
+
+At a budget of 20 the model is worth **3.7×** what chasing the biggest invoices is worth. At
+100 it is slightly *behind* — and that is exactly what should happen, because a budget of 100
+out of 202 candidates is drifting back toward chasing everything, where ranking cannot help
+anyone. **The tighter the capacity, the more the model is worth.** Reporting only the budget
+where it wins would be the easiest lie in this repo to tell.
+
+Note also that ranking on probability *alone* has the best precision at every budget (1.00 at
+K=20) and the **worst** net rupees. It carefully selects certainties worth ₹300. Precision is
+not the objective; money is.
+
+---
+
+## Stage 2 — recovery
 
 On a held-out set of 240 failed payments carrying ₹24.7 lakh of at-risk revenue:
 
@@ -119,6 +188,12 @@ thing three times over.
 
 Things that are wrong with this, stated before you find them:
 
+**Detection ground truth is a counterfactual we invented.** `would_self_recover` is knowable
+in a simulator and never knowable in production — you cannot observe what a customer would
+have done if you had left them alone. The real-world version of this label needs a holdout:
+withhold intervention from a random slice, and measure the difference. That experiment design
+is the honest answer, and it is what I would build first with real traffic.
+
 **The world model is synthetic.** No student has live retry outcomes, so success is drawn
 from a hand-specified table in `simulator.py`. Two things keep the comparison from being
 circular: that table is **not** the table the policy believes (`policy.BELIEVED_SUCCESS` is
@@ -148,6 +223,10 @@ an interview.
 ## Layout
 
 ```
+reclaim/surfaces.py     the four loss surfaces and what they share
+reclaim/detect.py       candidate extraction, features, logistic regression, rankers
+data/events.py          30-day raw merchant event stream with counterfactual labels
+eval/run_detect_eval.py detection: AUC per surface, capacity-constrained ranking
 reclaim/models.py       domain types; costs in rupees
 reclaim/diagnose.py     rules table, LLM diagnosers, tiered fallback
 reclaim/policy.py       propose() -> apply_guardrails(); all tunables in one block
