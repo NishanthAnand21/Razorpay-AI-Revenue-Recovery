@@ -67,6 +67,13 @@ PERMISSIVE = ObservableState(
     mandate_active=True,
     is_disputed=False,
     is_collections=False,
+    # The receivables rules veto by default -- statutory remedies are unavailable
+    # unless the supplier qualifies and the money is actually late -- so the
+    # permissive baseline has to satisfy them, or every other property would be
+    # checked against a baseline that is already blocking things.
+    supplier_is_msme=True,
+    days_past_appointed_day=1,
+    promise_to_pay_open=False,
 )
 
 # Values to enumerate per field: every threshold, plus one point either side.
@@ -88,6 +95,9 @@ DOMAINS: dict[str, list] = {
     "mandate_active": [True, False],
     "is_disputed": [True, False],
     "is_collections": [True, False],
+    "supplier_is_msme": [True, False],
+    "days_past_appointed_day": [-5, -1, 0, 1, 20],
+    "promise_to_pay_open": [True, False],
 }
 
 
@@ -223,6 +233,24 @@ PROPERTIES: list[Property] = [
              lambda s: not s.consent_transactional,
              OUTREACH_ACTIONS,
              "DPDP: withdrawal of consent must be honoured"),
+
+    Property("statutory_remedies_require_msme_status",
+             ("supplier_is_msme",),
+             lambda s: not s.supplier_is_msme,
+             {Action.ISSUE_INTEREST_NOTICE, Action.REFER_MSEFC},
+             "asserting a remedy a supplier is not entitled to is a false legal claim"),
+
+    Property("statutory_remedies_require_overdue",
+             ("days_past_appointed_day",),
+             lambda s: s.days_past_appointed_day <= 0,
+             {Action.ISSUE_INTEREST_NOTICE, Action.REFER_MSEFC},
+             "s.16 interest accrues only from the appointed day"),
+
+    Property("open_promise_suppresses_chasing",
+             ("promise_to_pay_open",),
+             lambda s: s.promise_to_pay_open,
+             OUTREACH_ACTIONS | {Action.REFER_MSEFC},
+             "chasing through a promise we accepted destroys the leverage it gave"),
 
     Property("disputed_amounts_untouched",
              ("is_disputed",),

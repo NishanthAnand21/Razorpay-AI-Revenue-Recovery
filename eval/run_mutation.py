@@ -15,6 +15,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from reclaim import compliance
 from reclaim.verify import PROPERTIES, check
 
+# The receivables rules live in the veto function rather than in a constant, so
+# they are mutated by monkeypatching the predicate the kernel calls.
+import reclaim.compliance as _c
+
+
+def _break_msme_gate():
+    orig = _c.vetoes
+
+    def patched(s):
+        out = [v for v in orig(s) if v.rule != "not_an_msme_supplier"]
+        return out
+    _c.vetoes = patched
+    _c.feasible_actions.__globals__["vetoes"] = patched
+
+
+def _break_promise_gate():
+    orig = _ORIGINAL_VETOES
+
+    def patched(s):
+        return [v for v in orig(s) if v.rule != "promise_to_pay_outstanding"]
+    _c.vetoes = patched
+    _c.feasible_actions.__globals__["vetoes"] = patched
+
+
+_ORIGINAL_VETOES = _c.vetoes
+
+
 # Each mutation is a plausible edit -- an off-by-one in a cap, a window trimmed,
 # a code dropped from a list -- paired with the property that should die.
 MUTATIONS = [
@@ -58,6 +85,12 @@ MUTATIONS = [
      lambda: setattr(compliance, "DEAD_INSTRUMENT_REASONS",
                      compliance.DEAD_INSTRUMENT_REASONS - {"mandate_revoked"})),
 
+    ("remove the MSME eligibility gate",
+     "statutory_remedies_require_msme_status", _break_msme_gate),
+
+    ("remove the open-promise suppression",
+     "open_promise_suppresses_chasing", _break_promise_gate),
+
     ("collections contact window widened to 08:00-21:00",
      "contact_window_respected",
      lambda: setattr(compliance, "COLLECTIONS_CONTACT_WINDOW", (8.0, 21.0))),
@@ -76,6 +109,8 @@ def snapshot() -> dict:
 def restore(snap: dict) -> None:
     for k, v in snap.items():
         setattr(compliance, k, v)
+    _c.vetoes = _ORIGINAL_VETOES
+    _c.feasible_actions.__globals__["vetoes"] = _ORIGINAL_VETOES
 
 
 def main() -> None:
