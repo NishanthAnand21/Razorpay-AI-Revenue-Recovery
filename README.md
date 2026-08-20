@@ -6,10 +6,15 @@ actually caused rather than what it took credit for.**
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-./run_all.sh        # 16 suites, ~30 seconds, no dependencies, no network
+./run_all.sh        # 17 suites, ~100 seconds, no dependencies, no network
 ```
 
-Python 3.11+. Nothing to install. Every number below is produced by that command.
+Python 3.11+. Nothing to install, nothing to configure, no network. Every number
+below is produced by that command.
+
+Most of the runtime is one suite: leave-one-reason-out trains 25 classifiers from
+scratch to test how the diagnoser behaves on failure reasons it has never seen.
+That is the check that keeps the accuracy claim honest, so it stays.
 
 ---
 
@@ -309,7 +314,7 @@ payments.
 | **note folded into key** | 337 | 337 | **57.9%** |
 
 Since the learned tier landed, this matters much less: the classifier absorbs
-52% of all payments and model calls fall to roughly **1 in 240**. The caching
+53% of all payments and model calls fall to **zero on this test set**. The caching
 analysis is kept because it is still the right answer for the residual, and
 because the correction below is the more instructive part.
 
