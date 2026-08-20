@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reclaim.detect import (LearnedDetector, LogisticModel, candidates_from_stream,
-                            featurise, load_stream, split)
+from reclaim.detect import (LearnedDetector, LogisticModel, PlattCalibrator,
+                            candidates_from_stream, featurise, load_stream, split)
 from reclaim.orchestrator import run
 from reclaim.security import AuditLog
 from reclaim.surfaces import Surface
@@ -19,7 +19,9 @@ def main() -> None:
     train, _test = split(items)
     model = LogisticModel().fit([featurise(i) for i in train],
                                 [1 if i.is_worth_chasing else 0 for i in train])
-    detector = LearnedDetector(model, 0.1)
+    # Calibrated: the queue ranks by probability x value, which calibration
+    # reorders at the top -- exactly the part a bounded budget consumes.
+    detector = LearnedDetector(PlattCalibrator(model).fit(train), 0.1)
 
     print(f"End to end -- one raw event stream, one queue, one audit trail\n")
     print(f"{len(items):,} stalls detected across {len(set(i.surface for i in items))} surfaces, "
@@ -65,6 +67,15 @@ asked to answer from intuition.""")
     r = run(items, detector=detector, capacity=250, log=log)
 
     print(f"""
+A NOTE ON THE EXPECTED RECOVERY COLUMN
+
+It is an expectation under the detector's own model, not a measurement. When the
+detector was calibrated, this column fell by about a fifth at every budget --
+nothing got worse, the earlier figure was the model flattering itself with
+probabilities that ran high. An expected-value number is only as honest as the
+probability inside it, which is the same lesson as gross recovery in a different
+costume.
+
 ONE QUEUE, NOT FOUR
 
 At small budgets the queue is entirely receivables, and that is the correct

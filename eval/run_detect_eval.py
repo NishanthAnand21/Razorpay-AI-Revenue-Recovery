@@ -12,8 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reclaim.detect import (ChaseEverything, LearnedDetector, LogisticModel, auc,
-                            candidates_from_stream, featurise, load_stream, split)
+from reclaim.detect import (ChaseEverything, LearnedDetector, LogisticModel,
+                            PlattCalibrator, auc, candidates_from_stream, featurise,
+                            load_stream, split)
 from reclaim.surfaces import AtRiskItem, Surface
 
 # What an intervention costs, and what it buys, per surface. These are the
@@ -220,7 +221,12 @@ there -- do not dress up a 0.53 AUC as personalisation.""")
 
     # --- the capacity-constrained comparison -------------------------------
     detector = LearnedDetector(model, t)
-    rankers = [Arbitrary(), ByAmount(), ByScore(detector), ByExpectedValue(detector)]
+    # Calibrated on train. Ranking by p x value is not monotonic in p, so
+    # calibration reorders the queue where it matters most: the top of it.
+    calibrated = LearnedDetector(PlattCalibrator(model).fit(train), t)
+    rankers = [Arbitrary(), ByAmount(), ByScore(detector), ByExpectedValue(detector),
+               ByExpectedValue(calibrated)]
+    rankers[-1].name = "calibrated_x_value"
     worth = sum(i.is_worth_chasing for i in test)
 
     print(f"\n\nRANKING UNDER A CAPACITY BUDGET")
