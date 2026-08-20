@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from reclaim import simulator
+from reclaim.compliance import MONEY_ACTIONS, feasible_actions, observe
 from reclaim import policy
 from reclaim.agent import DoNothing, ReclaimAgent, RetryAll, RetryBackoff
 from reclaim.diagnose import RULES_TABLE, RulesDiagnoser, TieredDiagnoser
@@ -37,15 +38,41 @@ def load(split: str) -> list[FailedPayment]:
 
 def score(strategy, rows: list[FailedPayment], noise: float = 0.0) -> dict:
     outs: list[RecoveryOutcome] = [strategy.run(p, noise) for p in rows]
-    at_risk = sum(p.amount_inr for p in rows)
-    recovered = sum(o.amount_inr for o in outs if o.recovered)
+
+    # Payments that had already settled were never at risk, and re-charging one
+    # is a duplicate debit, not a recovery. An earlier version of this scorer
+    # counted those as recovered revenue, which flattered every strategy that
+    # retries blindly -- the blanket baselines were being paid for their own
+    # worst failure mode.
+    at_risk = sum(p.amount_inr for p in rows if not p.settlement_actually_succeeded)
+    recovered = sum(o.amount_inr for p, o in zip(rows, outs)
+                    if o.recovered and not p.settlement_actually_succeeded)
     spend = sum(o.spend_inr for o in outs)
 
-    violations = wasted = 0
+    # Two distinct failures, kept apart on purpose (the security eval draws the
+    # same line): a compliance breach is an action the observable facts forbid,
+    # and the kernel decides it. A risky recharge is an action on a payment whose
+    # *true* cause was fraud but whose raw decline reason did not say so -- not
+    # decidable at the time, and so not a breach.
+    breaches = risky = wasted = double_charges = reconciles = already_paid = 0
     for p, o in zip(rows, outs):
+        already_paid += o.resolved_already_paid
+        # Baselines never consult the kernel, and never send a pre-debit notice
+        # either, so their retries are scored against a state with no notice
+        # outstanding -- which is exactly the state they actually create.
+        baseline_allowed, _ = feasible_actions(observe(p, local_hour=p.failed_at_hour))
         for d in o.decisions:
-            violations += simulator.is_compliance_violation(p, d)
+            cleared = d.kernel_cleared if strategy.name.startswith("reclaim") \
+                else d.action in baseline_allowed
+            if d.action in MONEY_ACTIONS and not cleared:
+                breaches += 1
+            risky += simulator.is_compliance_violation(p, d)
             wasted += simulator.is_wasted_retry(p, d)
+            reconciles += d.action is Action.RECONCILE
+            # The one that actually costs a customer money: re-charging a payment
+            # that had in fact already gone through.
+            if d.action in simulator.MONEY_ACTIONS and p.settlement_actually_succeeded:
+                double_charges += 1
 
     return {
         "strategy": strategy.name,
@@ -56,23 +83,28 @@ def score(strategy, rows: list[FailedPayment], noise: float = 0.0) -> dict:
         "spend_inr": spend,
         "net_inr": recovered - spend,
         "actions_taken": sum(len(o.decisions) for o in outs),
-        "compliance_violations": violations,
+        "compliance_breaches": breaches,
+        "risky_recharges": risky,
         "wasted_dead_instrument_retries": wasted,
         "escalations": sum(
             1 for o in outs for d in o.decisions if d.action is Action.ESCALATE_MANUAL
         ),
+        "double_charges": double_charges,
+        "reconciles": reconciles,
+        "already_paid": already_paid,
     }
 
 
 def print_recovery_table(results: list[dict], at_risk: float) -> None:
-    print(f"\n{'strategy':<20}{'recov%':>8}{'net INR':>13}{'spend':>10}"
-          f"{'actions':>9}{'violations':>12}{'wasted':>8}")
-    print("-" * 80)
+    print(f"\n{'strategy':<20}{'recov%':>8}{'net INR':>13}{'spend':>9}"
+          f"{'breach':>8}{'risky':>7}{'wasted':>8}{'double chg':>12}")
+    print("-" * 88)
     for r in results:
         print(f"{r['strategy']:<20}{r['recovery_rate']*100:>7.1f}%{r['net_inr']:>13,.0f}"
-              f"{r['spend_inr']:>10,.0f}{r['actions_taken']:>9}"
-              f"{r['compliance_violations']:>12}{r['wasted_dead_instrument_retries']:>8}")
-    print("-" * 80)
+              f"{r['spend_inr']:>9,.0f}{r['compliance_breaches']:>8}"
+              f"{r['risky_recharges']:>7}{r['wasted_dead_instrument_retries']:>8}"
+              f"{r['double_charges']:>12}")
+    print("-" * 88)
     print(f"total revenue at risk in the held-out set: INR {at_risk:,.0f}")
 
 
@@ -234,14 +266,19 @@ def main() -> None:
           f"INR {agent['net_inr'] - best_base:,.0f} "
           f"({(agent['net_inr']/best_base - 1)*100:+.1f}%)")
     print(f"""
-The guardrail that forbids retrying a risk decline keys off the *diagnosed*
-cause, so a misdiagnosed ambiguous decline can still slip through: the default
-agent commits {agent['compliance_violations']} such violations on this set. Strict mode refuses to move
-money on any diagnosis below 0.60 confidence and takes that to {strict['compliance_violations']}, at a cost of
-INR {agent['net_inr'] - strict['net_inr']:,.0f} in recovered revenue ({(strict['net_inr']/agent['net_inr']-1)*100:+.1f}%).
+breach     an action the observable facts forbid. The compliance kernel decides
+           this, so the agent is at {agent['compliance_breaches']} by construction and the blanket
+           baselines are at {results[1]['compliance_breaches']} -- they do not look.
+risky      a recharge on a payment whose true cause was fraud but whose raw
+           reason was `do_not_honour`, which Visa classifies as retryable. Not
+           decidable at the time. The agent takes {agent['risky_recharges']}; strict mode takes {strict['risky_recharges']},
+           costing INR {agent['net_inr'] - strict['net_inr']:,.0f} ({(strict['net_inr']/agent['net_inr']-1)*100:+.1f}%) of recovered revenue.
+double chg re-charging a payment that had already settled. The agent reconciles
+           first and takes {agent['double_charges']}; the baselines take {results[1]['double_charges']} and {results[2]['double_charges']}, and each one is a
+           customer debited twice for the same purchase.
 
-Which point on that curve is right is a risk-appetite call, not an engineering
-one, so both are reported rather than one being quietly chosen.""")
+Which point on the risky/revenue curve is right is a risk-appetite call, not an
+engineering one, so both are reported rather than one quietly chosen.""")
 
     diagnosis_report(test)
 

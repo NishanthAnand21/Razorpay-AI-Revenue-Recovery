@@ -129,6 +129,12 @@ AMBIGUOUS_REASONS: dict[str, tuple[RootCause, ...]] = {
 # Share of rows whose reason string is overwritten with an ambiguous one.
 AMBIGUOUS_FRACTION = 0.24
 
+# Reasons where the gateway never confirmed an outcome. A meaningful share of
+# these did in fact settle -- the notification was lost, not the payment.
+UNCONFIRMED_REASONS = {"gateway_timeout", "acquirer_switch_error", "npci_downtime",
+                       "payment_failed_at_bank"}
+SILENT_SUCCESS_RATE = 0.22
+
 METHODS = ["upi", "card", "netbanking", "wallet"]
 METHOD_WEIGHTS = [0.52, 0.30, 0.13, 0.05]
 
@@ -177,6 +183,8 @@ def generate(n: int = N, seed: int = SEED) -> list[FailedPayment]:
                 failed_at_hour=rng.randint(0, 23),
                 is_recurring=is_recurring,
                 customer_prior_failures=rng.choices([0, 1, 2, 3], [0.62, 0.24, 0.10, 0.04], k=1)[0],
+                settlement_actually_succeeded=(reason in UNCONFIRMED_REASONS
+                                               and rng.random() < SILENT_SUCCESS_RATE),
                 true_root_cause=cause,
             )
         )
@@ -202,6 +210,7 @@ def main() -> None:
             for r in subset:
                 d = r.to_public_dict()
                 d["true_root_cause"] = r.true_root_cause.value
+                d["settlement_actually_succeeded"] = r.settlement_actually_succeeded
                 fh.write(json.dumps(d) + "\n")
         print(f"wrote {len(subset):4d} rows -> {path.relative_to(out.parent)}")
 

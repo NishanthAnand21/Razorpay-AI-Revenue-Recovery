@@ -314,9 +314,11 @@ def feasible_actions(s: ObservableState) -> tuple[set[Action], list[Veto]]:
     for v in fired:
         forbidden |= v.forbids
     allowed = ALL_ACTIONS - forbidden
-    # STOP and ESCALATE_MANUAL are always available: doing nothing, and asking a
-    # human, are never themselves violations.
-    allowed |= {Action.STOP, Action.ESCALATE_MANUAL}
+    # STOP, ESCALATE_MANUAL and RECONCILE are always available: doing nothing,
+    # asking a human, and asking the gateway what actually happened are never
+    # themselves violations. RECONCILE in particular has to survive the
+    # unknown-settlement veto, because it is the way out of that state.
+    allowed |= {Action.STOP, Action.ESCALATE_MANUAL, Action.RECONCILE}
     return allowed, fired
 
 
@@ -374,9 +376,13 @@ def observe(payment, *, local_hour: float, reattempts_30d: int = 0,
     elif payment.method == "upi":
         rail = Rail.UPI_COLLECT
     elif payment.method == "card":
-        # Real systems read the BIN. Ours splits deterministically on the id so
-        # the choice is reproducible rather than random.
-        rail = Rail.CARD_VISA if hash(payment.payment_id) % 3 else Rail.CARD_MASTERCARD
+        # Real systems read the BIN. Ours splits on a digest of the id: Python's
+        # str hash is salted per process, so `hash()` here would silently assign
+        # a payment to a different network on every run and make the whole
+        # evaluation unreproducible.
+        import hashlib
+        h = int.from_bytes(hashlib.sha256(payment.payment_id.encode()).digest()[:4], "big")
+        rail = Rail.CARD_VISA if h % 3 else Rail.CARD_MASTERCARD
     elif payment.method == "netbanking":
         rail = Rail.NETBANKING
     else:

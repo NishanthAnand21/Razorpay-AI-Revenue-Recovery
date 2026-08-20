@@ -35,6 +35,7 @@ class Action(str, Enum):
     SWITCH_METHOD = "switch_method"            # re-attempt on a different instrument
     NUDGE_CUSTOMER = "nudge_customer"          # outreach asking the customer to act
     REQUEST_INSTRUMENT_UPDATE = "request_instrument_update"
+    RECONCILE = "reconcile"                    # ask the gateway what actually happened
     ESCALATE_MANUAL = "escalate_manual"        # hand to a human, take no money action
     STOP = "stop"                              # give up, on purpose, with a reason
 
@@ -54,6 +55,9 @@ ACTION_COST_INR: dict[Action, float] = {
     Action.SWITCH_METHOD: 2.0,
     Action.NUDGE_CUSTOMER: 0.0,               # priced by channel instead
     Action.REQUEST_INSTRUMENT_UPDATE: 0.0,
+    # A status lookup. Nearly free, moves no money, and is the only correct first
+    # move when the last attempt's outcome is unknown.
+    Action.RECONCILE: 0.10,
     Action.ESCALATE_MANUAL: 25.0,             # ~2 min of an ops analyst's time
     Action.STOP: 0.0,
 }
@@ -80,13 +84,17 @@ class FailedPayment:
     failed_at_hour: int            # 0-23, local time of the failure
     is_recurring: bool             # subscription / mandate debit
     customer_prior_failures: int   # how many times this customer failed recently
-    # Ground truth, used only for evaluation — never read by the agent.
+    # Ground truth, used only for evaluation -- never read by the agent.
+    # `settlement_actually_succeeded` marks a timeout that in fact settled and
+    # whose notification was lost. Retrying one of these is a double debit.
+    settlement_actually_succeeded: bool
     true_root_cause: RootCause
 
     def to_public_dict(self) -> dict[str, Any]:
         """The view the agent is allowed to see (no ground-truth leakage)."""
         d = asdict(self)
         d.pop("true_root_cause")
+        d.pop("settlement_actually_succeeded")
         return d
 
 
@@ -104,6 +112,13 @@ class Decision:
     delay_hours: int = 0
     rationale: str = ""
     blocked_by: str | None = None  # which guardrail vetoed a stronger action
+    # Whether the compliance kernel cleared this action *at the moment it was
+    # chosen*. Recorded here rather than recomputed later, because the state the
+    # kernel read -- counters, clock, outstanding pre-debit notice -- has moved on
+    # by the time anything scores it. An earlier evaluation reconstructed that
+    # state by hand and got it wrong, reporting 59 breaches for an agent that
+    # cannot commit one.
+    kernel_cleared: bool = True
 
     @property
     def cost_inr(self) -> float:
@@ -119,6 +134,9 @@ class RecoveryOutcome:
     recovered: bool
     decisions: list[Decision] = field(default_factory=list)
     recovered_on_attempt: int | None = None
+    # Reconciliation found the money had already arrived. Not a recovery -- there
+    # was nothing to recover -- but a double charge avoided, which is worth more.
+    resolved_already_paid: bool = False
 
     @property
     def spend_inr(self) -> float:

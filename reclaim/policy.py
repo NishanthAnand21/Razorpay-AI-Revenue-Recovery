@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .compliance import (MONEY_ACTIONS, OUTREACH_ACTIONS, Rail, SettlementState,
+                         earliest_legal_hour, feasible_actions, observe)
 from .models import Action, Channel, Decision, FailedPayment, RootCause
 from .diagnose import Diagnosis
 
@@ -55,6 +57,31 @@ BELIEVED_SUCCESS: dict[tuple[RootCause, Action], float] = {
 
 
 @dataclass
+class Ledger:
+    """Counters that span workflows.
+
+    The network caps are per card per 30 days and the contact budget is per
+    customer per week -- neither is a property of any single recovery workflow. A
+    customer with six subscriptions can breach the Visa cap without any one
+    workflow exceeding its own budget, which is precisely the bug that made the
+    earlier per-payment budgets insufficient.
+    """
+
+    reattempts_30d: dict[str, int] = field(default_factory=dict)
+    contacts_7d: dict[str, int] = field(default_factory=dict)
+    mandate_cycle_attempts: dict[str, int] = field(default_factory=dict)
+
+    def note_money_action(self, p: FailedPayment) -> None:
+        self.reattempts_30d[p.customer_id] = self.reattempts_30d.get(p.customer_id, 0) + 1
+        if p.is_recurring:
+            self.mandate_cycle_attempts[p.payment_id] = \
+                self.mandate_cycle_attempts.get(p.payment_id, 0) + 1
+
+    def note_contact(self, p: FailedPayment) -> None:
+        self.contacts_7d[p.customer_id] = self.contacts_7d.get(p.customer_id, 0) + 1
+
+
+@dataclass
 class RecoveryState:
     """Everything the policy is allowed to remember about a payment in flight."""
 
@@ -62,6 +89,7 @@ class RecoveryState:
     outreach_count: int = 0
     clock_hour: int = 0
     escalated: bool = False
+    reconciled: bool = False
     tried: list[Action] = field(default_factory=list)
 
 
@@ -148,17 +176,13 @@ def apply_guardrails(d: Decision, p: FailedPayment, st: RecoveryState) -> Decisi
     Ordered most-severe first. Each veto records itself in `blocked_by`, so the
     audit trail shows not just what we did but what we were stopped from doing.
     """
-    money_actions = {Action.RETRY_NOW, Action.RETRY_SCHEDULED, Action.SWITCH_METHOD}
+    money_actions = MONEY_ACTIONS
 
-    # 1. Hard compliance stop. Nothing overrides this.
-    if d.diagnosed_cause is RootCause.RISK_DECLINED and d.action in money_actions:
-        d.blocked_by = "risk_declined_never_retried"
-        d.action, d.channel = Action.ESCALATE_MANUAL, Channel.NONE
-
-    # 2. Never spend a gateway fee on an instrument that cannot work.
-    if d.diagnosed_cause is RootCause.INSTRUMENT_INVALID and d.action in money_actions:
-        d.blocked_by = "dead_instrument_not_retried"
-        d.action, d.channel = Action.REQUEST_INSTRUMENT_UPDATE, Channel.SMS
+    # Legality is no longer decided here. Rules 1 and 2 used to re-check risk
+    # declines and dead instruments off the *diagnosed* cause, which is exactly
+    # how a wrong diagnosis used to reach the money. The kernel now decides both
+    # from the raw decline reason, before this function is ever called, so what
+    # remains below is business policy: budgets, courtesy, and value.
 
     # 3. Don't move money on a diagnosis we don't believe.
     if d.diagnosis_confidence < CONFIG["min_confidence"] and d.action in money_actions:
@@ -197,5 +221,104 @@ def apply_guardrails(d: Decision, p: FailedPayment, st: RecoveryState) -> Decisi
     return d
 
 
-def decide(p: FailedPayment, dx: Diagnosis, st: RecoveryState) -> Decision:
-    return apply_guardrails(propose(p, dx, st), p, st)
+# --- the kernel comes first --------------------------------------------------
+
+def _state_for(p: FailedPayment, st: RecoveryState, ledger: Ledger):
+    """Assemble the observable facts. Nothing here is a model output."""
+    # A pre-debit notification covers the scheduled debit. A *retry* is another
+    # debit, so it needs its own notice -- which is why a mandate retry can never
+    # be immediate, and why the sequencer's job is choosing which moments to spend.
+    notice = 25.0 if st.money_attempts == 0 else None
+    s = observe(
+        p,
+        local_hour=st.clock_hour,
+        reattempts_30d=ledger.reattempts_30d.get(p.customer_id, 0),
+        mandate_cycle_attempts=ledger.mandate_cycle_attempts.get(p.payment_id, 0),
+        contacts_7d=ledger.contacts_7d.get(p.customer_id, 0),
+        hours_since_pre_debit_notice=notice,
+    )
+    if st.reconciled:
+        # We asked the gateway and it told us. The outcome is no longer unknown.
+        s.settlement_state = SettlementState.FAILED
+    return s
+
+
+def _blocking_rule(action: Action, fired) -> str | None:
+    for v in fired:
+        if action in v.forbids:
+            return v.rule
+    return None
+
+
+def project(d: Decision, allowed: set[Action], fired, state, st: RecoveryState) -> Decision:
+    """Move a proposal into the legal set, preferring to defer over to abandon.
+
+    A rule that says 'not now' is not a rule that says 'never'. Most of the
+    recoverable money on the timing-constrained rails is in that distinction: an
+    Autopay retry blocked at 11:00 is worth scheduling for 13:00, not dropping.
+    """
+    if d.action in allowed:
+        return d
+
+    d.blocked_by = _blocking_rule(d.action, fired)
+
+    if d.action in MONEY_ACTIONS and Action.RETRY_SCHEDULED in allowed:
+        hour = earliest_legal_hour(state, Action.RETRY_NOW)
+        delay = int((hour - state.local_hour) % 24) if hour is not None else 6
+        # A retry on a mandate needs its own 24h pre-debit notice.
+        if state.rail is Rail.UPI_AUTOPAY and (
+                state.hours_since_pre_debit_notice is None
+                or state.hours_since_pre_debit_notice < 24.0):
+            delay = max(delay, 24)
+        d.action, d.channel = Action.RETRY_SCHEDULED, Channel.NONE
+        d.delay_hours = max(1, delay)
+        d.rationale += f" (deferred {d.delay_hours}h: {d.blocked_by})"
+        return d
+
+    # A message blocked only by the clock is a message to send later, not a
+    # reason to wake an analyst. An earlier version tested `d.action in allowed`
+    # here, which is false by construction at this point in the function, so this
+    # branch never fired and every after-hours nudge became an escalation.
+    TIME_ONLY = {"outside_contact_window", "non_working_day"}
+    if d.action in OUTREACH_ACTIONS and d.blocked_by in TIME_ONLY:
+        hour = earliest_legal_hour(state, d.action)
+        if hour is not None:
+            d.delay_hours = max(1, int((hour - state.local_hour) % 24))
+            d.rationale += f" (held to {hour:.0f}:00: {d.blocked_by})"
+            return d
+
+    d.action = Action.ESCALATE_MANUAL if Action.ESCALATE_MANUAL in allowed else Action.STOP
+    d.channel = Channel.NONE
+    d.rationale += f" (no legal alternative: {d.blocked_by})"
+    return d
+
+
+def decide(p: FailedPayment, dx: Diagnosis, st: RecoveryState,
+           ledger: Ledger | None = None) -> Decision:
+    """Legality first, then intent, then business policy.
+
+    The ordering is the whole design. `feasible_actions` reads only facts, so the
+    set it returns is unaffected by anything the diagnoser got wrong. Only inside
+    that set does the model's opinion get to matter.
+    """
+    ledger = ledger if ledger is not None else Ledger()
+    state = _state_for(p, st, ledger)
+    allowed, fired = feasible_actions(state)
+
+    # An unconfirmed outcome has exactly one correct next move, and it is not a
+    # guess about the cause. Find out what actually happened first.
+    if state.settlement_state is SettlementState.UNKNOWN:
+        return Decision(
+            payment_id=p.payment_id,
+            attempt=st.money_attempts + st.outreach_count + 1,
+            diagnosed_cause=dx.cause, diagnosis_source=dx.source,
+            diagnosis_confidence=dx.confidence, action=Action.RECONCILE,
+            rationale="the gateway never confirmed an outcome; checking before "
+                      "doing anything that could debit the customer twice",
+            blocked_by="unknown_settlement",
+        )
+
+    d = project(propose(p, dx, st), allowed, fired, state, st)
+    d = apply_guardrails(d, p, st)
+    d.kernel_cleared = d.action in allowed
+    return d
