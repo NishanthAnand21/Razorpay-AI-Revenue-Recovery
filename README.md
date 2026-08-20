@@ -176,7 +176,61 @@ Diagnosis is tiered: a rules table answers **113/240 rows at 1.000 accuracy for
 free**, and the model handles the 127 rows it has never seen at **0.858**, where a
 rules-only system scores 0.000 by construction.
 
-## 4. Causal measurement — the part that is new
+## 4. Mandate retry sequencing — three shots, chosen well
+
+NPCI allows one execution plus three retries per cycle; RBI requires a 24-hour
+pre-debit notice before each; Autopay executes only in non-peak windows. So a
+mandate retry can never be immediate, and the only question is **which three
+moments to spend**.
+
+In India that answer is dominated by the salary cycle. The published smart-retry
+default — 24h, 72h, then day 7 — is a fixed offset from the *failure*, which is
+the one variable the outcome does not depend on. What determines whether a
+mandate clears is when the customer next gets paid.
+
+Exact dynamic programming over (day, retries left), on 20,000 failed cycles:
+
+| policy | recovered | merchant net ₹ | customer penalties ₹ | attempts | rule breaks |
+|---|---|---|---|---|---|
+| immediate burst ×3 | 59.8% | 3,04,22,332 | 82,13,100 | 2.15 | **20,000** |
+| industry 24h/72h/d7 | 56.8% | 2,88,71,366 | 71,65,200 | 1.93 | 0 |
+| next salary, once | 14.9% | 79,09,334 | 1,84,800 | 0.21 | 0 |
+| optimal, merchant only | 65.5% | 3,37,11,000 | 60,15,450 | 1.64 | 0 |
+| **optimal, prices harm** | 54.1% | **3,25,92,791** | **29,47,000** | 1.09 | 0 |
+
+**+12.9% merchant revenue and −58.9% customer penalties**, against the industry
+default, using half the attempts. Those are not in tension — waiting for the
+salary credit is better for both sides — which is the useful finding.
+
+### The cost nobody prices
+
+A failed auto-debit does not only cost the merchant a ₹2 gateway fee. Indian
+banks charge the **customer** a bounce penalty of roughly ₹250–500 per failed
+presentation. That never appears in the merchant's P&L, which is exactly why
+merchants over-retry.
+
+> Optimising merchant net alone earns **₹11.2 lakh more** while inflicting
+> **₹30.7 lakh more** in bank charges on customers — destroying **2.7 rupees of
+> value for every rupee gained.**
+
+So the sequencer solves both objectives and reports both, with a harm-weight
+curve (`--harm-sweep`) instead of a hidden constant. Going from weight 0 to 0.5
+cuts customer penalties by a third for 2.4% of merchant net. That knob is a
+policy decision, and publishing the curve lets whoever owns it decide with the
+numbers in view.
+
+### One number that looks wrong
+
+The joint policy recovers **54.1%** of cycles against the default's 56.8% — a
+*lower* recovery rate — while earning ₹37 lakh more. It declines small cycles
+whose expected recovery cannot cover the bank charge it would inflict, and spends
+the freed attempts on cycles that clear. **Fewer payments recovered, more money
+recovered.**
+
+Recovery rate is what this industry reports, and it is the wrong metric for the
+same reason gross recovery is: both count events instead of value.
+
+## 5. Causal measurement — the part that is new
 
 The industry reports **gross recovery**. In advertising, where holdouts are
 standard, measured lift runs far below platform-reported numbers. Dunning has not
@@ -207,7 +261,7 @@ That was not a broken design, it was an underpowered one — so `--power` report
 the volume needed: **~100k events**, below which the honest output is a
 confidence interval and not a point estimate.
 
-## 5. Security — assume injection succeeds
+## 6. Security — assume injection succeeds
 
 The merchant note is untrusted text feeding a model that influences whether money
 moves. The literature is consistent that injection cannot be reliably prevented,
@@ -234,7 +288,7 @@ sized for Indian identifiers — UPI VPAs have no TLD, so the first pattern miss
 every one of them — a hash-chained tamper-evident audit log, and deterministic
 idempotency keys so a redelivered queue message cannot become a second debit.
 
-## 6. Efficiency and scalability
+## 7. Efficiency and scalability
 
 **Diagnosis is a low-cardinality function, so its cost does not scale with
 volume.** 800 events contain 159 distinct `(reason, method, recurring)`
@@ -259,7 +313,7 @@ turn out to be the same design. And capacity allocation is a knapsack, not a
 filter; `p × value` is the greedy ratio heuristic, near-optimal until per-customer
 contact caps couple the items together. That coupling is the honest next problem.
 
-## 7. What is wrong with this
+## 8. What is wrong with this
 
 - **The world model is synthetic.** No student has live retry outcomes. Two things
   keep it from being circular: the simulator's success table is *not* the table
@@ -271,9 +325,13 @@ contact caps couple the items together. That coupling is the honest next problem
 - **The RD estimand is local.** It measures the effect on payments near a peak
   boundary, which is not the average effect across all payments. Treating it as
   global would be a misreading.
-- **Recovery executes on payment failures only.** Detection covers four surfaces;
-  the diagnose → guardrail → audit spine is surface-agnostic by design, but the
-  policies for carts, mandate sequencing and receivables are not written yet.
+- **Recovery executes on payment failures and mandate cycles.** Detection covers
+  four surfaces; cart recovery and receivables chasing still have no policy of
+  their own.
+- **The sequencer's funds curve is assumed, not fitted.** Its shape — a jump on
+  payday decaying through the month — is the right qualitative story and is
+  supported by the reporting on NACH failures, but the exact probabilities are
+  chosen, not measured. A merchant with real data should fit it per segment.
 - **Reported diagnosis accuracy is the offline stand-in's, not Claude's.**
   `ClaudeDiagnoser` calls the real API; that number is not in this README because
   it has not been measured, and an unmeasured number in a metrics table is how you
@@ -288,6 +346,7 @@ reclaim/compliance.py   the kernel: facts in, legal action set out
 reclaim/verify.py       14 machine-checked safety properties
 reclaim/causal.py       sharp RD, robust SEs, placebo and density checks
 reclaim/security.py     injection detection, PII redaction, hash-chained log
+reclaim/sequencer.py    exact DP for mandate retry scheduling, both objectives
 reclaim/detect.py       candidate extraction, features, logistic regression
 reclaim/diagnose.py     rules table, LLM tier, hardened tier
 reclaim/policy.py       legality first, then intent, then business policy
