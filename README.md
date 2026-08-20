@@ -6,7 +6,7 @@ actually caused rather than what it took credit for.**
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-./run_all.sh        # 14 suites, ~16 seconds, no dependencies, no network
+./run_all.sh        # 16 suites, ~30 seconds, no dependencies, no network
 ```
 
 Python 3.11+. Nothing to install. Every number below is produced by that command.
@@ -93,7 +93,8 @@ those zeros.
 |---|---|---|---|---|---|---|
 | retry everything ×3 | 39.2% | 7,93,742 | 279 | 30 | 87 | **11** |
 | retry, 24h backoff | 62.3% | 12,62,960 | 144 | 30 | 87 | **8** |
-| **Reclaim** | **64.6%** | **13,10,158** | **0** | 9 | 7 | **0** |
+| **Reclaim** | 64.6% | 13,10,158 | **0** | 9 | 7 | **0** |
+| **Reclaim (tuned)** | **65.7%** | **13,32,307** | **0** | 9 | 18 | **0** |
 | **Reclaim (strict)** | 64.1% | 13,00,454 | **0** | **0** | **0** | **0** |
 
 Three columns kept apart on purpose. A **breach** is an action the observable
@@ -171,7 +172,57 @@ rests entirely on the lifetime cost of an opt-out, which almost nobody measures.
 Blanket messaging turns value-destroying between 5 and 12 future recoverable
 events per customer; the gated policy stays positive across the whole sweep.
 
-## 5. Causal measurement — the new part
+## 5. Fitting the parts that were guesswork
+
+Three things in the policy were hand-set constants. Each was fitted or searched
+on **train** and reported on **test**, and two of the three results are negative.
+
+**Beliefs.** `BELIEVED_SUCCESS` was nine flat constants the expected-value gate
+read directly. `learn.py` now fits a table from kernel-legal exploration, keyed
+on the **diagnosed** cause — so diagnosis error is absorbed into the belief, and
+the gate automatically gets more conservative on causes the model is worst at —
+and conditioned on attempt index and delay bucket. Funds retries come out at
+**0.538 at 48h against 0.129 immediate**, which flat constants cannot express.
+
+A first fit landed systematically below the hand-written values and looked like a
+correction. It wasn't: exploration sampled random attempts and delays, so it was
+measuring "this action at *some* time" while the policy asks "at *my* chosen
+time". Conditioning fixed it.
+
+**The ablation is the result worth keeping:**
+
+| proposer | beliefs | recovered | net ₹ |
+|---|---|---|---|
+| rules ladder | hand-written | 64.6% | 13,10,158 |
+| rules ladder | fitted | 64.6% | 13,10,158 |
+| EV | hand-written | 54.2% | 10,99,529 |
+| **EV** | **fitted** | **65.7%** | **13,32,307** |
+
+Fitting alone changes **nothing**, because under the rules ladder nothing
+consults the beliefs — the EV gate only fires on payments too small to chase, so
+it was inert. And an EV proposer on flat beliefs is **worse** than the ladder,
+because flat constants cannot tell a 48-hour retry from an immediate one.
+Reporting only the combined number would have made two useless halves look like
+one improvement.
+
+**Thresholds.** 81 configurations searched on train. **32% of the training gain
+survived to test** — and only the attempt budget moves the objective at all.
+Two of the four constants are inert across their entire range, which is more
+useful than the tuned values: they are not worth arguing about, and any future
+report crediting them is reading noise.
+
+**Calibration.** The capacity ranking multiplies probability by value, and that
+product is not monotonic in `p` — so miscalibration reorders the queue even
+though it cannot change a ranking by `p` alone. I had leaned on this without
+checking it. ECE is 0.066, and calibrating is worth **+32% net recovery at a
+budget of 20 and nothing at all by 100**. That shape is the point: when you can
+only touch twenty things, the ordering at the top *is* the decision.
+
+Calibrating also **lowered** the orchestrator's reported expected recovery by
+about a fifth. Nothing got worse — the earlier figure was the model flattering
+itself, which is gross recovery's lesson in a different costume.
+
+## 6. Causal measurement — the new part
 
 Sharp regression discontinuity at the four NPCI peak boundaries, 400k mandate
 debits, graded against a planted truth the estimator never sees:
@@ -195,7 +246,7 @@ produced a placebo worth 72% of the real effect — underpowered, not broken —
 `--power` reports the volume needed: **~100k events**, below which the honest
 output is an interval, not a point estimate.
 
-## 6. Security
+## 7. Security
 
 The merchant note is untrusted text feeding a model that influences whether money
 moves. Injection cannot be reliably prevented, so the posture is containment.
@@ -216,7 +267,7 @@ Also: unicode confusable folding (NFKC does not fold Cyrillic `о`), PII redacti
 sized for Indian identifiers — UPI VPAs have no TLD, so the first pattern missed
 every one — a hash-chained audit log, and deterministic idempotency keys.
 
-## 7. Efficiency and scalability
+## 8. Efficiency and scalability
 
 Diagnosis is a low-cardinality function: **50% of payments never reach a model at
 all** (rules table), and the rest collapse to 337 distinct signatures across 800
@@ -248,7 +299,7 @@ overdue invoice can outweigh every cart in the batch. Four teams each optimising
 inside their own silo would never see that. The curve bends at 500 and saturates
 at 636, which answers "how big should the collections team be" with a number.
 
-## 8. What is wrong with this
+## 9. What is wrong with this
 
 - **The world models are synthetic.** No student has live retry outcomes. The
   simulator's success table is deliberately *not* the table the policy believes,
@@ -280,7 +331,8 @@ reclaim/security.py     injection detection, PII redaction, hash-chained log
 reclaim/sequencer.py    exact DP for mandate scheduling, both objectives
 reclaim/receivables.py  escalation ladder, promises, MSMED statutory interest
 reclaim/carts.py        cart EV against the lifetime cost of an opt-out
-reclaim/detect.py       candidate extraction, features, logistic regression
+reclaim/detect.py       features, logistic regression, Platt calibration
+reclaim/learn.py        fits the policy's beliefs from kernel-legal exploration
 reclaim/diagnose.py     rules table, model tier, hardened tier, cache
 reclaim/policy.py       legality first, then intent, then business policy
 reclaim/orchestrator.py one queue, one ledger, one audit chain
