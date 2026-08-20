@@ -7,11 +7,14 @@ Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
 ./serve.py --rate 4 --limit 40    # watch the agent run, live
-./run_all.sh                      # 19 suites, ~2 minutes, no network
+./run_all.sh                      # 20 suites, ~2 minutes, no internet needed
 ```
 
-Python 3.11+. Nothing to install, nothing to configure, no network. Every number
-below is produced by that command.
+Python 3.11+. Nothing to install, nothing to configure, no internet. Verified
+from a clean clone: 20 suites, 29 tests, 12/12 mutations, all green.
+
+Every number below is produced by `run_all.sh`, except the Razorpay figures,
+which come from `eval/run_realtime_test.py` against a live test-mode sandbox.
 
 Most of the runtime is one suite: leave-one-reason-out trains 25 classifiers from
 scratch to test how the diagnoser behaves on failure reasons it has never seen.
@@ -122,9 +125,12 @@ Three things the real API taught that the mock could not:
 
 | stage | p50 | p99 | per second |
 |---|---|---|---|
-| compliance kernel | **2.5 µs** | 3.5 µs | 400,586 |
-| full diagnosis (3 tiers) | 0.6 µs | 20.9 µs | 120,941 |
-| **full decision** | **9.6 µs** | 26.6 µs | **86,568** |
+| compliance kernel | ~2.5 µs | ~3.5 µs | ~400,000 |
+| full diagnosis (3 tiers) | ~0.6 µs | ~21 µs | ~120,000 |
+| **full decision** | **~7 µs** | **~21 µs** | **~87,000** |
+
+(Rounded on purpose — these move by 10–20% between machines and between runs.
+`python3 eval/run_latency.py` prints the exact figures for yours.)
 
 Legality costs 2.5 microseconds, so there is never a latency argument for
 skipping the compliance check — it can sit inline in a webhook handler. A
