@@ -6,7 +6,8 @@ actually caused rather than what it took credit for.**
 Submission for the Razorpay AI Buildathon, *AI Revenue Recovery* track.
 
 ```bash
-./run_all.sh        # 17 suites, ~100 seconds, no dependencies, no network
+./serve.py --rate 4 --limit 40    # watch the agent run, live
+./run_all.sh                      # 19 suites, ~2 minutes, no network
 ```
 
 Python 3.11+. Nothing to install, nothing to configure, no network. Every number
@@ -15,6 +16,64 @@ below is produced by that command.
 Most of the runtime is one suite: leave-one-reason-out trains 25 classifiers from
 scratch to test how the diagnoser behaves on failure reasons it has never seen.
 That is the check that keeps the accuracy claim honest, so it stays.
+
+---
+
+## Running it
+
+`serve.py` is the agent as a deployable process, not another evaluation. It takes
+one event at a time, decides, acts through a gateway, and prints what it did —
+**including everything it refused to do**, because a recovery agent's refusals are
+the interesting half.
+
+```
+   #  payment             diagnosis           tier     action                    outcome
+   1  pay_2026082000415   transient_issuer    rules    retry_now                 dry run: would retry_now
+   2  pay_2026082000716   auth_friction       learned  nudge_customer +8h        [quiet_hours_deferred]
+   3  pay_2026082000030   transient_issuer    learned  reconcile                 confirmed failed
+   8  pay_2026082000754   insufficient_funds  rules    retry_scheduled +48h      dry run: would retry_scheduled
+  14  pay_2026082000275   risk_declined       rules    stop                      [below_manual_review_threshold]
+
+  handled 18   acted 3   refused 7   reconciled 3   spend INR 41.65
+  audit 18 entries, verified, head d3f569beb5aafca3...
+```
+
+| flag | effect |
+|---|---|
+| `--rate 4` | pace to 4 events/second so it can be watched |
+| `--gateway razorpay` | real Razorpay **test-mode** reads (`RAZORPAY_KEY_ID` / `_SECRET`) |
+| `--execute` | actually act; refuses non-test keys, defaults off |
+| `--source stdin` | read JSONL events from a pipe |
+
+Three defaults are deliberate and are the difference between a demo and an
+incident: **dry run is on**, **gateway writes are off**, and a key that does not
+start `rzp_test_` is **refused outright**. A recovery agent that executes by
+default is one config mistake away from charging people.
+
+With no credentials it runs against a local stand-in and says so — it reports
+`gateway simulated` rather than quietly looking live. Reads (`fetch_payment`,
+which is what `RECONCILE` uses) are implemented against the real API; the write
+path exists and is gated, but a genuine retry needs a customer-present flow or a
+saved token, so what you can exercise against test keys today is the read side.
+Saying that plainly beats a demo that implies more than it does.
+
+### Is it fast enough to be inline?
+
+| stage | p50 | p99 | per second |
+|---|---|---|---|
+| compliance kernel | **2.5 µs** | 3.5 µs | 400,586 |
+| full diagnosis (3 tiers) | 0.6 µs | 20.9 µs | 120,941 |
+| **full decision** | **9.6 µs** | 26.6 µs | **86,568** |
+
+Legality costs 2.5 microseconds, so there is never a latency argument for
+skipping the compliance check — it can sit inline in a webhook handler. A
+merchant with 50 million failed payments a year averages under two per second;
+one core clears that by ~43,000×. **Throughput is not the constraint and never
+will be.** The constraint is capacity to *act* — messages, calls, analyst time —
+which is what the capacity queue is for.
+
+The number not in that table is the model tier: a network round trip, four orders
+of magnitude slower than everything above. That is the real argument for tiering.
 
 ---
 
@@ -376,7 +435,10 @@ reclaim/learn.py        fits the policy's beliefs from kernel-legal exploration
 reclaim/diagnose.py     rules table, model tier, hardened tier, cache
 reclaim/policy.py       legality first, then intent, then business policy
 reclaim/orchestrator.py one queue, one ledger, one audit chain
-tests/test_all.py       16 regression tests, no test framework required
+reclaim/service.py      the agent as a deployable process
+reclaim/gateway.py      Razorpay test-mode client, and a stand-in
+serve.py                run it live
+tests/test_all.py       27 regression tests, no test framework required
 docs/RESEARCH.md        the regulation, with sources, and ten edge cases
 ```
 

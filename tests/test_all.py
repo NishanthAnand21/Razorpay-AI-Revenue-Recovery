@@ -296,6 +296,98 @@ def pricing_customer_harm_never_increases_customer_harm():
            "pricing harm made it worse")
 
 
+# --- the deployable service --------------------------------------------------
+
+def _fake_payment(**over):
+    from reclaim.models import FailedPayment, RootCause
+    base = dict(payment_id="pay_svc_1", customer_id="cust_1", amount_inr=2500.0,
+                method="upi", error_code="GATEWAY_ERROR", error_reason="gateway_timeout",
+                merchant_note="", failed_at_hour=14, is_recurring=False,
+                customer_prior_failures=0, settlement_actually_succeeded=False,
+                true_root_cause=RootCause.UNKNOWN)
+    base.update(over)
+    return FailedPayment(**base)
+
+
+@test
+def the_service_runs_without_any_ground_truth():
+    """A deployed process cannot see true causes or counterfactuals.
+
+    The evals can; the service must not depend on anything they hold. This test
+    hands it a payment whose ground-truth fields are empty and requires a full
+    decision anyway -- if it ever starts needing them, this fails rather than
+    the discovery being made in production.
+    """
+    from reclaim.service import RecoveryService
+    svc = RecoveryService()
+    h = svc.handle(_fake_payment())
+    ok(h.decision.action is not None, "no decision produced")
+    ok(len(svc.audit.entries) == 1, "event not audited")
+
+
+@test
+def dry_run_never_moves_money():
+    from reclaim.compliance import MONEY_ACTIONS
+    from reclaim.service import RecoveryService
+    svc = RecoveryService(dry_run=True)
+    for i in range(60):
+        h = svc.handle(_fake_payment(payment_id=f"pay_dry_{i}",
+                                     error_reason="insufficient_funds",
+                                     failed_at_hour=i % 24))
+        if h.decision.action in MONEY_ACTIONS:
+            ok(not h.executed, f"dry run executed {h.decision.action.value}")
+
+
+@test
+def reconcile_catches_an_already_settled_payment():
+    """The double-charge guard, end to end through the service."""
+    from reclaim.gateway import SimulatedGateway
+    from reclaim.models import Action
+    from reclaim.service import RecoveryService
+    p = _fake_payment(payment_id="pay_settled", settlement_actually_succeeded=True)
+    svc = RecoveryService(gateway=SimulatedGateway({p.payment_id: p}))
+    h = svc.handle(p)
+    eq(h.decision.action, Action.RECONCILE, "did not reconcile an unknown outcome: ")
+    ok("already settled" in h.result, f"missed a settled payment: {h.result}")
+
+
+@test
+def gateway_refuses_live_keys_and_writes_by_default():
+    from reclaim.gateway import GatewayError, RazorpayTestGateway
+    try:
+        RazorpayTestGateway("rzp_live_xxxx", "secret")
+        ok(False, "a live key was accepted")
+    except GatewayError:
+        pass
+    g = RazorpayTestGateway("rzp_test_xxxx", "secret")
+    try:
+        g.capture_payment("pay_1", 10.0, idempotency_key="k")
+        ok(False, "a write ran with allow_writes=False")
+    except GatewayError:
+        pass
+
+
+@test
+def gateway_never_exposes_the_secret():
+    """A traceback or a log line must not be able to print the key."""
+    from reclaim.gateway import RazorpayTestGateway
+    g = RazorpayTestGateway("rzp_test_abc", "supersecretvalue")
+    blob = repr(g.__dict__)
+    ok("supersecretvalue" not in blob, "secret is readable from the instance dict")
+    ok("supersecretvalue" not in repr(g), "secret is readable from repr()")
+
+
+@test
+def every_handled_event_is_audited_and_the_chain_holds():
+    from reclaim.service import RecoveryService
+    svc = RecoveryService()
+    for i in range(40):
+        svc.handle(_fake_payment(payment_id=f"pay_a_{i}", failed_at_hour=i % 24))
+    eq(len(svc.audit.entries), 40, "missing audit entries: ")
+    ok(svc.audit.verify()[0], "audit chain broken")
+    ok(svc.health()["audit_intact"], "health check disagrees with verify()")
+
+
 # --- determinism -------------------------------------------------------------
 
 @test
