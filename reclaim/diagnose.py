@@ -204,6 +204,53 @@ class TieredDiagnoser:
         return self.llm.diagnose(p)
 
 
+class ThreeTierDiagnoser:
+    """Rules -> a classifier trained on labelled history -> the model.
+
+    The two-tier version skipped straight from an exact-match table to a language
+    model, which meant a merchant's own resolved failures -- thousands of labelled
+    examples -- were never used, and the model was asked to reason from scratch
+    about cases the history already answers.
+
+    Ascending order of cost, and each tier only handles what the one below it
+    could not: the rules table is free, the classifier is microseconds, and the
+    model is a network call. Routing is by the classifier's *margin* over its
+    runner-up rather than its top probability, because a confident-looking 0.55
+    that beats second place by 0.02 is a coin flip.
+    """
+
+    name = "three_tier"
+
+    def __init__(self, learned, llm=None) -> None:
+        self.rules = RulesDiagnoser()
+        self.learned = learned
+        self.llm = llm or MockLLMDiagnoser()
+        self.counts = {"rules": 0, "learned": 0, "llm": 0}
+
+    def diagnose(self, p: FailedPayment) -> Diagnosis:
+        d = self.rules.diagnose(p)
+        if d.cause is not RootCause.UNKNOWN:
+            self.counts["rules"] += 1
+            return d
+
+        pred = self.learned.predict(p)
+        if self.learned.confident(pred):
+            self.counts["learned"] += 1
+            return Diagnosis(
+                pred.cause,
+                # Report the margin-adjusted confidence, not the raw softmax
+                # probability: the policy's money gate reads this number, and it
+                # should reflect how clearly the call was won.
+                min(0.95, 0.5 + pred.margin / 2.0),
+                "learned",
+                f"classifier: {pred.confidence:.0%} for {pred.cause.value}, "
+                f"margin {pred.margin:.2f} over the runner-up",
+            )
+
+        self.counts["llm"] += 1
+        return self.llm.diagnose(p)
+
+
 class HardenedDiagnoser:
     """A diagnoser that treats the merchant note as hostile input.
 

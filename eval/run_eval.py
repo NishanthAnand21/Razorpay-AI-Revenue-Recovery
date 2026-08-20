@@ -254,12 +254,18 @@ def main() -> None:
     results = [score(s, test) for s in (DoNothing(), RetryAll(), RetryBackoff())]
     results.append(score(ReclaimAgent(), test))
 
-    # Beliefs fitted on train only, then evaluated here.
+    # Everything fitted on train only, then evaluated here: the belief table, the
+    # EV proposer that consults it, and the learned diagnosis tier.
+    from reclaim.classify import train as train_classifier
+    from reclaim.diagnose import ThreeTierDiagnoser
     from reclaim.learn import fit
-    beliefs, _notes = fit(load("train"), hand_written=policy.BELIEVED_SUCCESS)
+    train_rows = load("train")
+    beliefs, _notes = fit(train_rows, hand_written=policy.BELIEVED_SUCCESS)
+    learned_dx = train_classifier(train_rows, l2=1e-4)
+    learned_dx.min_margin = 0.10
     policy.set_beliefs(beliefs)
     policy.set_proposer("ev")
-    tuned = score(ReclaimAgent(), test)
+    tuned = score(ReclaimAgent(diagnoser=ThreeTierDiagnoser(learned_dx)), test)
     tuned["strategy"] = "reclaim_agent[tuned]"
     results.append(tuned)
     policy.set_proposer("rules")
