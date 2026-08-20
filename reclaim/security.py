@@ -33,7 +33,9 @@ made irrelevant to anything that matters.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import re
 import time
 import unicodedata
@@ -226,8 +228,20 @@ class AuditLog:
         self.entries.append(entry)
         return entry
 
-    def verify(self) -> tuple[bool, int | None]:
-        """Return (intact, first_bad_index)."""
+    def verify(self, expected: tuple[int, str] | None = None
+               ) -> tuple[bool, int | None]:
+        """Return (intact, first_bad_index).
+
+        Chaining detects edits and reordering. It does NOT detect truncation: an
+        attacker who deletes entries from the end leaves a chain that still
+        verifies perfectly, because every remaining link is genuine. That is a
+        real limitation of hash chaining and not a bug to be coded around --
+        detecting it requires an anchor from outside the log.
+
+        Pass `expected` as a (length, head) checkpoint recorded earlier, from
+        anywhere the attacker does not control, and truncation becomes
+        detectable. `checkpoint()` produces one.
+        """
         prev = self.GENESIS
         for e in self.entries:
             if e.prev_hash != prev:
@@ -235,7 +249,18 @@ class AuditLog:
             if self._digest(e.seq, e.timestamp, e.payload, e.prev_hash) != e.hash:
                 return False, e.seq
             prev = e.hash
+
+        if expected is not None:
+            length, head = expected
+            if len(self.entries) < length:
+                return False, len(self.entries)
+            if length and self.entries[length - 1].hash != head:
+                return False, length - 1
         return True, None
+
+    def checkpoint(self) -> tuple[int, str]:
+        """A (length, head) anchor. Publish it somewhere the log is not."""
+        return len(self.entries), self.head
 
     @property
     def head(self) -> str:
@@ -243,7 +268,34 @@ class AuditLog:
         return self.entries[-1].hash if self.entries else self.GENESIS
 
 
-# --- 4. idempotency ----------------------------------------------------------
+# --- 4. pseudonymisation -----------------------------------------------------
+
+LOG_KEY_ENV = "RECLAIM_LOG_KEY"
+# Used when no key is configured. It is NOT a secret and is not pretended to be:
+# with a known key the pseudonyms are reversible by anyone who can guess the
+# identifier space, which for customer ids is small. Its only job is to keep raw
+# identifiers out of an exported log by default, and to keep the eval output
+# reproducible. Production sets RECLAIM_LOG_KEY.
+_DEFAULT_LOG_KEY = b"reclaim-default-unkeyed"
+
+
+def log_key_source() -> str:
+    """Whether real keying is in force. Say so rather than implying it."""
+    return "configured" if os.environ.get(LOG_KEY_ENV) else "default (not secret)"
+
+
+def pseudonymise(identifier: str) -> str:
+    """Stable, keyed pseudonym for an identifier appearing in the audit log.
+
+    HMAC rather than a bare hash: a plain SHA-256 of a customer id is trivially
+    reversed by hashing every candidate id, and the id space here is small enough
+    that this is not a theoretical objection.
+    """
+    key = os.environ.get(LOG_KEY_ENV, "").encode() or _DEFAULT_LOG_KEY
+    return "cid_" + hmac.new(key, identifier.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+# --- 5. idempotency ----------------------------------------------------------
 
 def idempotency_key(payment_id: str, attempt: int, action: str,
                     *, cycle: int = 0) -> str:

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from .compliance import ObservableState, Rail, feasible_actions
 from .models import ACTION_COST_INR, CHANNEL_COST_INR, Action, Channel
-from .security import AuditLog, idempotency_key
+from .security import AuditLog, idempotency_key, pseudonymise
 from .surfaces import AtRiskItem, Surface
 
 # What a single intervention costs on each surface, and what fraction of the
@@ -93,12 +93,20 @@ def _observe(item: AtRiskItem, contacts_7d: int, hour: float) -> ObservableState
         contacts_7d=contacts_7d,
         is_collections=item.surface is Surface.RECEIVABLE,
         is_disputed=bool(ev.get("disputed")),
-        # Scheduled mandate debits carry a standing pre-debit notice.
-        hours_since_pre_debit_notice=25.0,
+        # Read from the event, never assumed. This line used to hardcode 25.0 --
+        # asserting that a pre-debit notice existed without checking -- which
+        # broke the one premise the kernel depends on: that every field on
+        # ObservableState is observed rather than believed. A fabricated fact
+        # defeats a proof about facts, and this one would have authorised
+        # immediate mandate retries that RBI does not permit.
+        #
+        # Absent evidence, None is the safe value: it means "no valid notice
+        # outstanding", so the kernel defers the retry rather than allowing it.
+        hours_since_pre_debit_notice=ev.get("hours_since_pre_debit_notice"),
         # Receivables facts. Conservative defaults: a supplier is not assumed
         # eligible for a statutory remedy, and nothing is assumed overdue.
         supplier_is_msme=bool(ev.get("supplier_is_msme")),
-        days_past_appointed_day=int(ev.get("days_past_due", 0)),
+        days_past_appointed_day=int(ev.get("days_past_due") or 0),
     )
 
 
@@ -155,7 +163,13 @@ def run(items: list[AtRiskItem], *, detector, capacity: int,
         # auditor actually asks, which is what else was considered.
         log.append({
             "item": it.item_id, "surface": it.surface.value,
-            "customer": it.customer_id, "amount_inr": round(it.amount_inr, 2),
+            # Pseudonymised: the audit trail is the artefact most likely to be
+            # exported, shipped to a log service or handed to a reviewer, and it
+            # does not need the real customer identifier to be useful. The
+            # mapping is stable, so a reviewer can still follow one customer
+            # through the log.
+            "customer": pseudonymise(it.customer_id),
+            "amount_inr": round(it.amount_inr, 2),
             "action": iv.action.value, "expected_value_inr": round(ev, 2),
             "kernel_cleared": cleared, "blocked_by": blocked,
             "idempotency_key": iv.idempotency_key,
