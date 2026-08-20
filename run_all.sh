@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 n=0
-total=20
+total=21
 step() { n=$((n+1)); printf '\n\033[1m===  %d/%d  %s  ===\033[0m\n\n' "$n" "$total" "$1"; }
 
 step "generate data"
@@ -25,6 +25,7 @@ step "detection";                    python3 eval/run_detect_eval.py
 step "calibration";                  python3 eval/run_calibration.py
 step "recovery";                     python3 eval/run_eval.py
 step "threshold tuning";             python3 eval/run_tuning.py
+step "recovery ceiling";             python3 eval/run_ceiling.py
 step "causal lift";                  python3 eval/run_causal_eval.py
 step "mandate retry sequencing";     python3 eval/run_sequencer_eval.py
 step "receivables chasing";          python3 eval/run_receivables_eval.py

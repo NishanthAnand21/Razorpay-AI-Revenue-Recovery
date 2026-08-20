@@ -13,6 +13,11 @@ class ReclaimAgent:
     """Diagnose-then-act, with every step passed through the guardrail layer."""
 
     name = "reclaim_agent"
+    # Decisions from this agent carry their own compliance provenance, recorded
+    # at the moment of choice. Anything scoring them should read that rather
+    # than trying to reconstruct the kernel state afterwards -- the counters,
+    # clock and outstanding notice have all moved on by then.
+    kernel_aware = True
 
     def __init__(self, diagnoser=None, ledger: Ledger | None = None) -> None:
         self.diagnoser = diagnoser or TieredDiagnoser()
@@ -72,6 +77,7 @@ class DoNothing:
     """The floor. Whatever we do has to beat abandoning the money."""
 
     name = "do_nothing"
+    kernel_aware = False
 
     def run(self, p: FailedPayment, noise: float = 0.0) -> RecoveryOutcome:
         return RecoveryOutcome(payment_id=p.payment_id, amount_inr=p.amount_inr, recovered=False)
@@ -81,6 +87,7 @@ class RetryAll:
     """What most teams ship: hammer every failure three times, immediately."""
 
     name = "retry_all_x3"
+    kernel_aware = False
 
     def run(self, p: FailedPayment, noise: float = 0.0) -> RecoveryOutcome:
         out = RecoveryOutcome(payment_id=p.payment_id, amount_inr=p.amount_inr, recovered=False)
@@ -101,6 +108,7 @@ class RetryBackoff:
     """A more careful blanket policy: same idea, but spaced 24h apart."""
 
     name = "retry_backoff_x3"
+    kernel_aware = False
 
     def run(self, p: FailedPayment, noise: float = 0.0) -> RecoveryOutcome:
         out = RecoveryOutcome(payment_id=p.payment_id, amount_inr=p.amount_inr, recovered=False)

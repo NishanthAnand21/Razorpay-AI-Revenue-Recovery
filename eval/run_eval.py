@@ -62,8 +62,12 @@ def score(strategy, rows: list[FailedPayment], noise: float = 0.0) -> dict:
         # outstanding -- which is exactly the state they actually create.
         baseline_allowed, _ = feasible_actions(observe(p, local_hour=p.failed_at_hour))
         for d in o.decisions:
-            cleared = d.kernel_cleared if strategy.name.startswith("reclaim") \
-                else d.action in baseline_allowed
+            # Matching on the strategy NAME was a latent bug: any kernel-aware
+            # agent not called "reclaim*" -- the oracle in run_ceiling.py, for
+            # one -- had its state reconstructed wrongly and was reported as
+            # committing breaches it had explicitly refused to commit.
+            cleared = (d.kernel_cleared if getattr(strategy, "kernel_aware", False)
+                       else d.action in baseline_allowed)
             if d.action in MONEY_ACTIONS and not cleared:
                 breaches += 1
             risky += simulator.is_compliance_violation(p, d)
