@@ -92,6 +92,24 @@ COLLECTIONS_CONTACT_WINDOW = (8.0, 19.0)
 # Ordinary transactional messaging is less restricted than collections.
 TRANSACTIONAL_CONTACT_WINDOW = (9.0, 21.0)
 
+# Raw gateway reasons that must never be re-charged, on ANY rail.
+#
+# The card networks publish their own never-retry codes, but they only bind card
+# traffic -- and a fraud decline on UPI is exactly as wrong to re-charge as one on
+# Visa. An earlier version of this kernel only checked the card lists, so a
+# security evaluation walked straight through it on UPI payments. These are raw
+# reason strings straight off the gateway, so keying on them still involves no
+# inference.
+RISK_DECLINE_REASONS = {
+    "suspected_fraud", "payment_declined_by_risk", "velocity_rule_triggered",
+}
+# Instruments that are permanently dead. Retrying is not a compliance breach here,
+# it is a guaranteed-zero spend, so the kernel refuses it on value grounds.
+DEAD_INSTRUMENT_REASONS = {
+    "mandate_revoked", "card_reported_lost", "token_deprovisioned",
+    "invalid_vpa", "card_expired", "debit_not_registered",
+}
+
 MONEY_ACTIONS = {Action.RETRY_NOW, Action.RETRY_SCHEDULED, Action.SWITCH_METHOD}
 OUTREACH_ACTIONS = {Action.NUDGE_CUSTOMER, Action.REQUEST_INSTRUMENT_UPDATE}
 
@@ -106,6 +124,7 @@ class ObservableState:
 
     rail: Rail
     network_response_code: str | None = None   # raw code from the network
+    decline_reason: str | None = None          # raw reason slug from the gateway
     settlement_state: SettlementState = SettlementState.FAILED
 
     # counters, straight from the ledger
@@ -164,6 +183,23 @@ def vetoes(s: ObservableState) -> list[Veto]:
             "the money arrived, most likely after we flagged it; there is nothing "
             "to recover and a nudge now is actively damaging",
             "self-recovery race",
+        ))
+
+    # --- rail-agnostic decline rules -----------------------------------------
+    reason = (s.decline_reason or "").lower()
+    if reason in RISK_DECLINE_REASONS:
+        out.append(Veto(
+            "risk_decline_never_recharged", MONEY_ACTIONS,
+            f"the gateway declined this for risk ({reason}); re-charging it "
+            "automatically is not permitted on any rail",
+            "risk/compliance decline",
+        ))
+    if reason in DEAD_INSTRUMENT_REASONS:
+        out.append(Veto(
+            "dead_instrument", MONEY_ACTIONS,
+            f"the instrument is permanently dead ({reason}); a retry has a zero "
+            "success rate and costs a gateway fee",
+            "value, not law",
         ))
 
     # --- network rules -------------------------------------------------------
@@ -352,6 +388,7 @@ def observe(payment, *, local_hour: float, reattempts_30d: int = 0,
     return ObservableState(
         rail=rail,
         network_response_code=REASON_TO_NETWORK_CODE.get(reason),
+        decline_reason=reason,
         settlement_state=settlement,
         reattempts_30d=reattempts_30d,
         attempts_this_mandate_cycle=mandate_cycle_attempts,

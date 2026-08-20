@@ -48,6 +48,16 @@ MUTATIONS = [
      "autopay_requires_pre_debit_notice",
      lambda: setattr(compliance, "EMANDATE_PRE_DEBIT_NOTICE_HOURS", 12.0)),
 
+    ("drop suspected_fraud from risk declines",
+     "risk_declines_never_recharged_any_rail",
+     lambda: setattr(compliance, "RISK_DECLINE_REASONS",
+                     compliance.RISK_DECLINE_REASONS - {"suspected_fraud"})),
+
+    ("drop mandate_revoked from dead instruments",
+     "dead_instruments_never_recharged",
+     lambda: setattr(compliance, "DEAD_INSTRUMENT_REASONS",
+                     compliance.DEAD_INSTRUMENT_REASONS - {"mandate_revoked"})),
+
     ("collections contact window widened to 08:00-21:00",
      "contact_window_respected",
      lambda: setattr(compliance, "COLLECTIONS_CONTACT_WINDOW", (8.0, 21.0))),
@@ -59,7 +69,8 @@ def snapshot() -> dict:
         "VISA_NEVER_RETRY", "MASTERCARD_NEVER_RETRY", "VISA_REATTEMPT_CAP_30D",
         "MASTERCARD_REATTEMPT_CAP_30D", "UPI_AUTOPAY_ATTEMPTS_PER_CYCLE",
         "UPI_PEAK_WINDOWS", "EMANDATE_PRE_DEBIT_NOTICE_HOURS",
-        "COLLECTIONS_CONTACT_WINDOW")}
+        "COLLECTIONS_CONTACT_WINDOW", "RISK_DECLINE_REASONS",
+        "DEAD_INSTRUMENT_REASONS")}
 
 
 def restore(snap: dict) -> None:

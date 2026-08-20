@@ -35,7 +35,8 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable, Iterator
 
-from .compliance import (MASTERCARD_NEVER_RETRY, MONEY_ACTIONS, OUTREACH_ACTIONS,
+from .compliance import (DEAD_INSTRUMENT_REASONS, MASTERCARD_NEVER_RETRY,
+                         MONEY_ACTIONS, OUTREACH_ACTIONS, RISK_DECLINE_REASONS,
                          Rail, SettlementState, VISA_NEVER_RETRY, ObservableState,
                          feasible_actions)
 from .models import Action
@@ -46,6 +47,7 @@ from .models import Action
 PERMISSIVE = ObservableState(
     rail=Rail.NETBANKING,
     network_response_code=None,
+    decline_reason=None,
     settlement_state=SettlementState.FAILED,
     reattempts_30d=0,
     attempts_this_mandate_cycle=0,
@@ -72,6 +74,8 @@ DOMAINS: dict[str, list] = {
     "rail": list(Rail),
     "network_response_code": sorted(VISA_NEVER_RETRY | MASTERCARD_NEVER_RETRY
                                     | {"05", "51", "54", "00"}) + [None],
+    "decline_reason": sorted(RISK_DECLINE_REASONS | DEAD_INSTRUMENT_REASONS
+                             | {"insufficient_funds", "do_not_honour", "gateway_timeout"}) + [None],
     "settlement_state": list(SettlementState),
     "reattempts_30d": [0, 9, 10, 11, 14, 15, 16, 40],
     "attempts_this_mandate_cycle": [0, 1, 3, 4, 5],
@@ -124,6 +128,18 @@ def _states_over(fields: tuple[str, ...]) -> Iterator[ObservableState]:
 
 
 PROPERTIES: list[Property] = [
+    Property("risk_declines_never_recharged_any_rail",
+             ("rail", "decline_reason"),
+             lambda s: (s.decline_reason or "") in RISK_DECLINE_REASONS,
+             MONEY_ACTIONS,
+             "a fraud decline is as wrong to re-charge on UPI as on a card"),
+
+    Property("dead_instruments_never_recharged",
+             ("rail", "decline_reason"),
+             lambda s: (s.decline_reason or "") in DEAD_INSTRUMENT_REASONS,
+             MONEY_ACTIONS,
+             "a dead instrument has a zero success rate on every rail"),
+
     Property("visa_category_1_never_retried",
              ("rail", "network_response_code"),
              lambda s: s.rail is Rail.CARD_VISA

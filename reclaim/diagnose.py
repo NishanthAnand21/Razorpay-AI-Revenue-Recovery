@@ -202,3 +202,48 @@ class TieredDiagnoser:
         if d.cause is not RootCause.UNKNOWN:
             return d
         return self.llm.diagnose(p)
+
+
+class HardenedDiagnoser:
+    """A diagnoser that treats the merchant note as hostile input.
+
+    Three changes from the plain tiered path, in order of how much they matter:
+
+    1. If the note looks like an injection attempt, we do not try to clean it and
+       carry on. We abstain -- return UNKNOWN at low confidence, which the policy
+       turns into a human escalation. A note arguing with the classifier is not a
+       note worth trusting once it has been tidied up.
+    2. PII is stripped before any text reaches the model, independently of
+       whether the note is suspicious.
+    3. Confidence derived from note text is capped. Free text supplied by a third
+       party should never be able to push a diagnosis over the threshold at which
+       money moves; the structured fields have to carry that weight.
+    """
+
+    name = "hardened"
+    NOTE_DERIVED_CONFIDENCE_CAP = 0.60
+
+    def __init__(self, inner=None) -> None:
+        self.inner = inner or TieredDiagnoser()
+
+    def diagnose(self, p: FailedPayment) -> Diagnosis:
+        from .security import prepare_for_model
+
+        safe_note, scan, _pii = prepare_for_model(p.merchant_note)
+
+        if scan.suspicious:
+            return Diagnosis(
+                RootCause.UNKNOWN, 0.0, "quarantined",
+                f"merchant note rejected ({', '.join(scan.findings)}); "
+                "escalating rather than classifying on adversarial input",
+            )
+
+        # Re-diagnose against the sanitised note rather than the original, so the
+        # model never sees the raw bytes even when they looked harmless.
+        import dataclasses
+        cleaned = dataclasses.replace(p, merchant_note=safe_note)
+        d = self.inner.diagnose(cleaned)
+
+        if safe_note and d.source in ("llm", "llm_fallback"):
+            d.confidence = min(d.confidence, self.NOTE_DERIVED_CONFIDENCE_CAP)
+        return d
