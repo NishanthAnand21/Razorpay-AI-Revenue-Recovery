@@ -5,29 +5,32 @@ cd "$(dirname "$0")"
 
 step() { printf '\n\033[1m===  %s  ===\033[0m\n\n' "$1"; }
 
-step "1/11  generate data"
+step "1/12  regression tests"
+python3 tests/test_all.py
+
+step "2/12  generate data"
 python3 data/generate.py
 python3 data/events.py
 python3 data/panel.py
 python3 data/cycles.py
 python3 data/receivables.py
 
-step "2/11  verify the compliance kernel"
+step "3/12  verify the compliance kernel"
 python3 eval/run_verification.py
 
-step "3/11  mutation-test the verifier"
+step "4/12  mutation-test the verifier"
 python3 eval/run_mutation.py
 
-step "4/11  adversarial safety"
+step "5/12  adversarial safety"
 python3 eval/run_adversarial.py
 
-step "5/11  security"
+step "6/12  security"
 python3 eval/run_security_eval.py
 
-step "6/11  detection"
+step "7/12  detection"
 python3 eval/run_detect_eval.py
 
-step "7/11  recovery and causal lift"
+step "8/12  recovery and causal lift"
 python3 eval/run_eval.py
 python3 eval/run_causal_eval.py
 
