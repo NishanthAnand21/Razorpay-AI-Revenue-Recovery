@@ -253,6 +253,17 @@ def main() -> None:
 
     results = [score(s, test) for s in (DoNothing(), RetryAll(), RetryBackoff())]
     results.append(score(ReclaimAgent(), test))
+
+    # Beliefs fitted on train only, then evaluated here.
+    from reclaim.learn import fit
+    beliefs, _notes = fit(load("train"), hand_written=policy.BELIEVED_SUCCESS)
+    policy.set_beliefs(beliefs)
+    policy.set_proposer("ev")
+    tuned = score(ReclaimAgent(), test)
+    tuned["strategy"] = "reclaim_agent[tuned]"
+    results.append(tuned)
+    policy.set_proposer("rules")
+    policy.set_beliefs(None)
     policy.set_strict(True)
     strict = score(ReclaimAgent(), test)
     strict["strategy"] = "reclaim_agent[strict]"
@@ -279,6 +290,39 @@ double chg re-charging a payment that had already settled. The agent reconciles
 
 Which point on the risky/revenue curve is right is a risk-appetite call, not an
 engineering one, so both are reported rather than one quietly chosen.""")
+
+    # --- ablation ---------------------------------------------------------
+    print(f"""
+ABLATION: TWO CHANGES THAT ONLY WORK TOGETHER
+
+  proposer  'rules' is the hand-written ladder (if the cause is X on attempt N,
+            do Y). 'ev' picks the legal action and delay with the highest
+            believed expected value.
+  beliefs   'hand-written' is nine flat constants. 'fitted' is a table learned
+            from kernel-legal exploration on train, conditioned on the attempt
+            index and, for scheduled retries, on the delay.
+""")
+    print(f"{'proposer':<12}{'beliefs':<14}{'recovered':>11}{'net INR':>13}")
+    print("-" * 50)
+    for prop in ("rules", "ev"):
+        for bname, b in (("hand-written", None), ("fitted", beliefs)):
+            policy.set_proposer(prop)
+            policy.set_beliefs(b)
+            r = score(ReclaimAgent(), test)
+            print(f"{prop:<12}{bname:<14}{r['recovery_rate']*100:>10.1f}%{r['net_inr']:>13,.0f}")
+    policy.set_proposer("rules")
+    policy.set_beliefs(None)
+    print("-" * 50)
+    print("""
+Fitting the beliefs changes nothing on its own, because under the rules ladder
+nothing consults them -- the expected-value gate only fires on payments too
+small to chase, so it was inert. And the EV proposer is WORSE than the ladder on
+hand-written beliefs, because flat constants cannot tell a 48-hour retry from an
+immediate one, and timing is the entire lever on funds failures.
+
+Together they beat the ladder. Reporting only the combined number would have
+made this look like one improvement instead of two halves that are useless
+apart, and would have hidden that the belief table is the part doing the work.""")
 
     diagnosis_report(test)
 

@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 
 from .compliance import (MONEY_ACTIONS, OUTREACH_ACTIONS, Rail, SettlementState,
                          earliest_legal_hour, feasible_actions, observe)
-from .models import Action, Channel, Decision, FailedPayment, RootCause
+from .models import (ACTION_COST_INR, CHANNEL_COST_INR, Action, Channel, Decision,
+                     FailedPayment, RootCause)
 from .diagnose import Diagnosis
 
 # --- tunables (fitted on train, frozen before touching test) ------------------
@@ -30,7 +31,12 @@ QUIET_HOURS_MORNING = range(0, 9)
 MIN_CONFIDENCE_TO_ACT = 0.50
 STRICT_MIN_CONFIDENCE_TO_ACT = 0.60
 
-CONFIG = {"min_confidence": MIN_CONFIDENCE_TO_ACT}
+CONFIG = {"min_confidence": MIN_CONFIDENCE_TO_ACT, "proposer": "rules"}
+
+
+def set_proposer(mode: str) -> None:
+    """'rules' for the hand-written ladder, 'ev' for belief-driven selection."""
+    CONFIG["proposer"] = mode
 
 
 def set_strict(on: bool) -> None:
@@ -43,6 +49,10 @@ MIN_AMOUNT_TO_CHASE_INR = 60.0
 # The agent's *beliefs* about how likely each action is to work. Deliberately a
 # separate table from the simulator's ground truth -- an agent that knows the
 # world model exactly is not an agent, it is a lookup.
+# Hand-written fallbacks. `reclaim/learn.py` fits a richer table -- conditioned
+# on the attempt index and, for scheduled retries, on the delay bucket -- and
+# these remain as the fallback for cells too thin to estimate. They are keyed on
+# the *diagnosed* cause, which is all the policy ever knows.
 BELIEVED_SUCCESS: dict[tuple[RootCause, Action], float] = {
     (RootCause.TRANSIENT_ISSUER, Action.RETRY_NOW): 0.55,
     (RootCause.TRANSIENT_ISSUER, Action.RETRY_SCHEDULED): 0.62,
@@ -54,6 +64,25 @@ BELIEVED_SUCCESS: dict[tuple[RootCause, Action], float] = {
     (RootCause.LIMIT_EXCEEDED, Action.SWITCH_METHOD): 0.44,
     (RootCause.INSTRUMENT_INVALID, Action.REQUEST_INSTRUMENT_UPDATE): 0.28,
 }
+
+
+class _FlatBeliefs:
+    """The hand-written table behind the same interface as a fitted one."""
+
+    def get(self, cause: RootCause, action: Action, attempt: int = 1,
+            delay_hours: int = 0) -> float:
+        return BELIEVED_SUCCESS.get((cause, action), 0.15)
+
+
+# Swapped for a fitted BeliefTable by set_beliefs(). Defaults to the
+# hand-written values so the policy works with no training step at all.
+BELIEFS = _FlatBeliefs()
+
+
+def set_beliefs(table) -> None:
+    """Install a fitted belief table. Fit on train; never on the evaluation set."""
+    global BELIEFS
+    BELIEFS = table if table is not None else _FlatBeliefs()
 
 
 @dataclass
@@ -168,6 +197,65 @@ def propose(p: FailedPayment, dx: Diagnosis, st: RecoveryState) -> Decision:
     return d
 
 
+# --- choosing by expected value instead of by rule ---------------------------
+#
+# `propose` above is a hand-written ladder: if the cause is X on attempt N, do Y.
+# It encodes real domain knowledge and it is readable, which is worth a lot. But
+# it cannot use a fitted belief table, and fitting one had no effect on outcomes
+# precisely because nothing downstream consulted it -- the expected-value gate
+# only ever fires on payments too small to chase, so it was inert.
+#
+# This proposer picks the legal action, and for a scheduled retry the delay, that
+# maximises believed expected value. With the hand-written flat beliefs it should
+# do roughly nothing, since flat beliefs cannot distinguish a 48-hour retry from
+# an immediate one. With fitted beliefs it can.
+
+# Delays worth considering for a scheduled retry. Deliberately coarse: these
+# match the buckets the belief table is fitted on, and proposing a delay finer
+# than the evidence supports would be false precision.
+CANDIDATE_DELAYS = (6, 24, 48)
+
+
+def propose_by_ev(p: FailedPayment, dx: Diagnosis, st: RecoveryState,
+                  allowed: set[Action]) -> Decision:
+    """Pick the highest-expected-value legal action, and say why."""
+    attempt = st.money_attempts + st.outreach_count + 1
+    options: list[tuple[float, Action, Channel, int]] = []
+
+    for action in sorted(allowed & (MONEY_ACTIONS | OUTREACH_ACTIONS),
+                         key=lambda a: a.value):
+        if action in st.tried and action is not Action.RETRY_SCHEDULED:
+            continue                      # repeating the same lever rarely pays
+        channel = Channel.WHATSAPP if action in OUTREACH_ACTIONS else Channel.NONE
+        delays = CANDIDATE_DELAYS if action is Action.RETRY_SCHEDULED else (0,)
+        for delay in delays:
+            rate = BELIEFS.get(dx.cause, action, attempt, delay)
+            cost = ACTION_COST_INR[action] + CHANNEL_COST_INR[channel]
+            options.append((rate * p.amount_inr - cost, action, channel, delay))
+
+    if not options:
+        return Decision(
+            payment_id=p.payment_id, attempt=attempt, diagnosed_cause=dx.cause,
+            diagnosis_source=dx.source, diagnosis_confidence=dx.confidence,
+            action=Action.STOP, rationale="no legal action has positive value")
+
+    ev, action, channel, delay = max(options, key=lambda t: t[0])
+    if ev <= 0:
+        return Decision(
+            payment_id=p.payment_id, attempt=attempt, diagnosed_cause=dx.cause,
+            diagnosis_source=dx.source, diagnosis_confidence=dx.confidence,
+            action=Action.STOP,
+            rationale=f"best legal option is worth INR {ev:,.2f}; stopping")
+
+    rate = BELIEFS.get(dx.cause, action, attempt, delay)
+    return Decision(
+        payment_id=p.payment_id, attempt=attempt, diagnosed_cause=dx.cause,
+        diagnosis_source=dx.source, diagnosis_confidence=dx.confidence,
+        action=action, channel=channel, delay_hours=delay,
+        rationale=f"highest expected value of {len(options)} legal options: "
+                  f"believed {rate:.0%} success, INR {ev:,.0f} expected")
+
+
 # --- the brakes --------------------------------------------------------------
 
 def apply_guardrails(d: Decision, p: FailedPayment, st: RecoveryState) -> Decision:
@@ -213,7 +301,7 @@ def apply_guardrails(d: Decision, p: FailedPayment, st: RecoveryState) -> Decisi
 
     # 8. Expected value. If believed recovery can't cover the cost, don't bother.
     if d.action in money_actions:
-        ev = BELIEVED_SUCCESS.get((d.diagnosed_cause, d.action), 0.15) * p.amount_inr
+        ev = BELIEFS.get(d.diagnosed_cause, d.action, d.attempt, d.delay_hours) * p.amount_inr
         if ev < d.cost_inr or p.amount_inr < MIN_AMOUNT_TO_CHASE_INR:
             d.blocked_by = "negative_expected_value"
             d.action, d.channel = Action.STOP, Channel.NONE
@@ -318,7 +406,9 @@ def decide(p: FailedPayment, dx: Diagnosis, st: RecoveryState,
             blocked_by="unknown_settlement",
         )
 
-    d = project(propose(p, dx, st), allowed, fired, state, st)
+    raw = (propose_by_ev(p, dx, st, allowed) if CONFIG["proposer"] == "ev"
+           else propose(p, dx, st))
+    d = project(raw, allowed, fired, state, st)
     d = apply_guardrails(d, p, st)
     d.kernel_cleared = d.action in allowed
     return d
