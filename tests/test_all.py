@@ -107,12 +107,18 @@ def a_hostile_diagnosis_cannot_unlock_an_illegal_action():
 
 @test
 def decisions_record_their_own_compliance_provenance():
+    """Generates its own fixtures rather than reading data/.
+
+    An earlier version loaded data/test.jsonl, which made the whole suite depend
+    on a generation step having run first -- so on a clean checkout the tests
+    failed for a reason that had nothing to do with the code. Tests that need
+    data should make it.
+    """
+    from data.generate import generate
     from reclaim.diagnose import TieredDiagnoser
     from reclaim.policy import Ledger, RecoveryState, decide
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
-    from run_eval import load
     dg, ledger = TieredDiagnoser(), Ledger()
-    for p in load("test")[:50]:
+    for p in generate(50):
         d = decide(p, dg.diagnose(p), RecoveryState(clock_hour=p.failed_at_hour), ledger)
         ok(isinstance(d.kernel_cleared, bool), "missing provenance")
 

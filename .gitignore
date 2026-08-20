@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .env
+
+# Generated deterministically by data/*.py; run_all.sh rebuilds them.
+data/*.jsonl
+data/events.json
