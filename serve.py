@@ -66,17 +66,30 @@ def load_events(source: str, limit: int) -> list[FailedPayment]:
 
 def open_gateway(kind: str, payments, execute: bool):
     if kind == "simulated":
-        return SimulatedGateway(payments), None
+        return SimulatedGateway(payments), None, None
+    if kind == "mock":
+        # Start a local Razorpay stand-in and talk to it over real HTTP, so the
+        # whole client path is exercised -- auth header, retries, timeouts, JSON
+        # parsing, idempotency -- with nothing to configure.
+        from tools.mock_razorpay import serve_in_thread
+        httpd, _thread = serve_in_thread(8787)
+        gw = RazorpayTestGateway(base="http://127.0.0.1:8787/v1",
+                                 allow_writes=execute)
+        return gw, None, httpd
     try:
-        return RazorpayTestGateway(allow_writes=execute), None
+        return RazorpayTestGateway(allow_writes=execute), None, None
     except GatewayError as exc:
-        return SimulatedGateway(payments), str(exc)
+        return SimulatedGateway(payments), str(exc), None
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", choices=("synthetic", "stdin"), default="synthetic")
-    ap.add_argument("--gateway", choices=("simulated", "razorpay"), default="simulated")
+    ap.add_argument("--gateway", choices=("simulated", "mock", "razorpay"),
+                    default="simulated",
+                    help="simulated = in-process; mock = real HTTP to a local "
+                         "Razorpay stand-in; razorpay = the real API "
+                         "(or whatever RECLAIM_API_BASE points at)")
     ap.add_argument("--rate", type=float, default=0.0,
                     help="events per second; 0 = unpaced")
     ap.add_argument("--limit", type=int, default=60)
@@ -89,12 +102,17 @@ def main() -> None:
         print("no events", file=sys.stderr)
         sys.exit(1)
 
-    gateway, fallback_reason = open_gateway(
+    gateway, fallback_reason, httpd = open_gateway(
         args.gateway, {p.payment_id: p for p in events}, args.execute)
 
     print(c("\n  Reclaim — live recovery agent", BOLD))
     mode = c("EXECUTING", RED) if args.execute else c("dry run", GREY)
-    live = c("LIVE", GREEN) if getattr(gateway, "live", False) else c("simulated", GREY)
+    if getattr(gateway, "live", False):
+        live = c("LIVE razorpay", GREEN)
+    elif getattr(gateway, "name", "") == "razorpay-mock":
+        live = c(f"mock over HTTP ({gateway.base})", YELLOW)
+    else:
+        live = c("simulated", GREY)
     print(f"  gateway {live}   mode {mode}   {len(events)} events"
           f"{f'   {args.rate:g}/s' if args.rate else ''}")
     if fallback_reason:
@@ -164,7 +182,11 @@ def main() -> None:
     print(f"  {c('latency', DIM)} p99 {health['p99_latency_us']:.0f}us   "
           f"{c('throughput', DIM)} {s.handled/max(elapsed,1e-9):,.0f}/s"
           f"{c(' (paced)', DIM) if args.rate else ''}")
+    if getattr(gateway, "calls", 0):
+        print(f"  {c('gateway', DIM)} {gateway.calls} call(s) to {gateway.name}")
     print()
+    if httpd is not None:
+        httpd.shutdown()
 
 
 if __name__ == "__main__":

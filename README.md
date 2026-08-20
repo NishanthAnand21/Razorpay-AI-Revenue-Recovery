@@ -41,6 +41,7 @@ the interesting half.
 | flag | effect |
 |---|---|
 | `--rate 4` | pace to 4 events/second so it can be watched |
+| `--gateway mock` | real HTTP to a local Razorpay stand-in — no setup, works offline |
 | `--gateway razorpay` | real Razorpay **test-mode** reads (`RAZORPAY_KEY_ID` / `_SECRET`) |
 | `--execute` | actually act; refuses non-test keys, defaults off |
 | `--source stdin` | read JSONL events from a pipe |
@@ -49,6 +50,23 @@ Three defaults are deliberate and are the difference between a demo and an
 incident: **dry run is on**, **gateway writes are off**, and a key that does not
 start `rzp_test_` is **refused outright**. A recovery agent that executes by
 default is one config mistake away from charging people.
+
+`--gateway mock` starts `tools/mock_razorpay.py` and drives the whole HTTP client
+— auth header, retries, timeouts, JSON parsing, idempotency — over a real socket,
+with nothing to configure. It returns ~18% of "failed" payments as actually
+captured, so the demo really does catch double charges:
+
+```
+   3  pay_2026082000030  transient_issuer  learned  reconcile   already settled -- double charge avoided
+   7  pay_2026082000516  transient_issuer  learned  reconcile   already settled -- double charge avoided
+
+  2 payment(s) had already settled — double charges avoided by reconciling first
+```
+
+`RECLAIM_API_BASE` repoints the same client at a hosted mock or the real sandbox.
+See [docs/MOCK_API.md](docs/MOCK_API.md). A mock is **not** test mode, and the
+client reports itself as `razorpay-mock` rather than letting a demo look more real
+than it is.
 
 With no credentials it runs against a local stand-in and says so — it reports
 `gateway simulated` rather than quietly looking live. Reads (`fetch_payment`,
@@ -438,7 +456,8 @@ reclaim/orchestrator.py one queue, one ledger, one audit chain
 reclaim/service.py      the agent as a deployable process
 reclaim/gateway.py      Razorpay test-mode client, and a stand-in
 serve.py                run it live
-tests/test_all.py       27 regression tests, no test framework required
+tools/mock_razorpay.py  a Razorpay stand-in over real HTTP
+tests/test_all.py       29 regression tests, no test framework required
 docs/RESEARCH.md        the regulation, with sources, and ten edge cases
 ```
 

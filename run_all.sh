@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 n=0
-total=19
+total=20
 step() { n=$((n+1)); printf '\n\033[1m===  %d/%d  %s  ===\033[0m\n\n' "$n" "$total" "$1"; }
 
 step "generate data"
@@ -32,5 +32,6 @@ step "abandoned carts";              python3 eval/run_carts_eval.py
 step "end to end";                   python3 eval/run_end_to_end.py
 step "latency";                      python3 eval/run_latency.py
 step "live agent smoke test";        ./serve.py --limit 8
+step "live agent over HTTP";         ./serve.py --gateway mock --limit 40
 
 printf '\n\033[1mAll %d suites completed.\033[0m\n' "$total"

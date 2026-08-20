@@ -35,6 +35,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 API_BASE = "https://api.razorpay.com/v1"
+# Point the client at a mock server instead. Useful for exercising the real HTTP
+# path -- auth headers, retries, timeouts, JSON parsing, latency -- without live
+# credentials, which is most of what can actually break in an integration.
+#
+# A mock is NOT test mode. Razorpay test mode is Razorpay's own sandbox with
+# their semantics; a mock returns whatever you told it to. Both are useful and
+# they are not the same claim, so the client reports which one it is talking to.
+API_BASE_ENV = "RECLAIM_API_BASE"
 TIMEOUT_SECONDS = 10.0
 MAX_RETRIES = 3
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -111,21 +119,29 @@ class RazorpayTestGateway:
     difference between a demo and charging somebody.
     """
 
-    live = True
-    name = "razorpay"
-
     def __init__(self, key_id: str | None = None, key_secret: str | None = None,
-                 *, allow_writes: bool = False) -> None:
+                 *, allow_writes: bool = False, base: str | None = None) -> None:
+        self.base = (base or os.environ.get(API_BASE_ENV) or API_BASE).rstrip("/")
+        self.is_mock = "api.razorpay.com" not in self.base
+
         key_id = key_id or os.environ.get("RAZORPAY_KEY_ID", "")
         key_secret = key_secret or os.environ.get("RAZORPAY_KEY_SECRET", "")
-        if not key_id or not key_secret:
-            raise GatewayError(
-                "RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are not set")
-        if not key_id.startswith("rzp_test_") and \
-                not os.environ.get("RECLAIM_ALLOW_LIVE_KEYS"):
-            raise GatewayError(
-                f"refusing to run against a non-test key ({key_id[:12]}...). "
-                "Set RECLAIM_ALLOW_LIVE_KEYS=1 only if you mean it.")
+
+        if self.is_mock:
+            # A mock does not authenticate anything, so requiring real keys to
+            # talk to one would only push people toward putting real keys where
+            # they are not needed. Placeholders, and the object says it is a mock.
+            key_id = key_id or "rzp_test_mock"
+            key_secret = key_secret or "mock"
+        else:
+            if not key_id or not key_secret:
+                raise GatewayError(
+                    "RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are not set")
+            if not key_id.startswith("rzp_test_") and \
+                    not os.environ.get("RECLAIM_ALLOW_LIVE_KEYS"):
+                raise GatewayError(
+                    f"refusing to run against a non-test key ({key_id[:12]}...). "
+                    "Set RECLAIM_ALLOW_LIVE_KEYS=1 only if you mean it.")
         # Held as an opaque header value rather than as the key pair, so a
         # traceback or a repr of this object cannot print the secret.
         self._auth = "Basic " + base64.b64encode(
@@ -134,9 +150,19 @@ class RazorpayTestGateway:
         self.allow_writes = allow_writes
         self.calls = 0
 
+    @property
+    def live(self) -> bool:
+        """True only against Razorpay itself. A mock is a real round trip to
+        fabricated data, which is a different claim and is reported as one."""
+        return not self.is_mock
+
+    @property
+    def name(self) -> str:
+        return "razorpay-mock" if self.is_mock else "razorpay"
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  idempotency_key: str | None = None) -> dict:
-        url = f"{API_BASE}{path}"
+        url = f"{self.base}{path}"
         data = json.dumps(body).encode() if body is not None else None
         last: Exception | None = None
 
@@ -149,7 +175,21 @@ class RazorpayTestGateway:
             try:
                 self.calls += 1
                 with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
-                    return json.loads(resp.read().decode())
+                    raw = resp.read().decode(errors="replace").strip()
+                # A mock with no rule for this path answers 200 with an empty
+                # body or a friendly greeting. Letting json.loads raise here
+                # would surface as a generic decode error three frames away, so
+                # it is named at the boundary instead.
+                if not raw:
+                    raise GatewayError(
+                        f"{method} {path}: empty response from {self.base} "
+                        "(no mock rule configured for this path?)")
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    raise GatewayError(
+                        f"{method} {path}: response was not JSON "
+                        f"({raw[:60]!r}...)") from None
             except urllib.error.HTTPError as exc:
                 if exc.code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
                     # Exponential backoff. A 429 answered by an immediate retry

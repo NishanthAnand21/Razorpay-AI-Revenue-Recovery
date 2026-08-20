@@ -388,6 +388,67 @@ def every_handled_event_is_audited_and_the_chain_holds():
     ok(svc.health()["audit_intact"], "health check disagrees with verify()")
 
 
+@test
+def the_http_client_works_against_a_real_server():
+    """Exercises the actual network path, not a stubbed one.
+
+    Auth header, JSON parsing, error mapping and idempotency all live in code
+    that a purely in-process test never reaches. A local server is cheap enough
+    that there is no excuse for leaving that untested.
+    """
+    import time
+    from reclaim.gateway import RazorpayTestGateway
+    from tools.mock_razorpay import serve_in_thread
+    httpd, _ = serve_in_thread(8793)
+    try:
+        time.sleep(0.2)
+        g = RazorpayTestGateway(base="http://127.0.0.1:8793/v1", allow_writes=True)
+        eq(g.name, "razorpay-mock", "a mock reported itself as live razorpay: ")
+        ok(not g.live, "a mock must not claim to be live")
+
+        settled = g.fetch_payment("pay_settledExample")
+        ok(settled.settled, "a captured payment did not read as settled")
+        failed = g.fetch_payment("pay_failExample")
+        ok(failed.confirmed_failed, "a failed payment did not read as failed")
+        ok(failed.error_reason, "no decline reason returned")
+
+        a = g.capture_payment("pay_cap1", 100.0, idempotency_key="idm_fixed")
+        b = g.capture_payment("pay_cap1", 100.0, idempotency_key="idm_fixed")
+        eq(a.status, "captured", "capture did not capture: ")
+        ok(b.raw.get("reclaim_replayed"), "idempotent replay was charged again")
+    finally:
+        httpd.shutdown()
+
+
+@test
+def a_missing_mock_rule_produces_a_named_error():
+    """Empty 200s are what a half-configured mock actually returns."""
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+    from reclaim.gateway import GatewayError, RazorpayTestGateway
+
+    class Empty(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    httpd = HTTPServer(("127.0.0.1", 8794), Empty)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        time.sleep(0.2)
+        g = RazorpayTestGateway(base="http://127.0.0.1:8794/v1")
+        try:
+            g.fetch_payment("pay_whatever")
+            ok(False, "an empty body was accepted as a payment")
+        except GatewayError as exc:
+            ok("empty response" in str(exc), f"unhelpful error: {exc}")
+    finally:
+        httpd.shutdown()
+
+
 # --- determinism -------------------------------------------------------------
 
 @test
