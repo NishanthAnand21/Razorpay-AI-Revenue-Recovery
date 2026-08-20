@@ -75,6 +75,49 @@ path exists and is gated, but a genuine retry needs a customer-present flow or a
 saved token, so what you can exercise against test keys today is the read side.
 Saying that plainly beats a demo that implies more than it does.
 
+### Verified against Razorpay test mode
+
+`eval/run_realtime_test.py` runs the agent against Razorpay's real sandbox — real
+objects, real HTTP, real latency, and with `--execute`, a real reminder leaving
+the building through Razorpay's own notify API.
+
+An issued, unpaid **payment link** is revenue at risk with an id you can act on,
+which makes it the one surface that is real end to end: creatable, chaseable and
+reconcilable through the API.
+
+```
+  RECONCILE — fetching live status for 4 receivables
+    plink_TS7Kl4BOHEMgfh  AT RISK   INR     964.00     224ms
+    plink_TS7KgT0HOyQJya  AT RISK   INR   7,250.00     307ms
+
+    hour  receivable            action    result
+     11h  plink_TS7Kl4BOHEMgfh  notify    REMINDER SENT (576ms)
+     15h  plink_TS7Kl4BOHEMgfh  notify    REMINDER SENT (680ms)
+     22h  plink_TS7Kl4BOHEMgfh  stop      refused — outside_contact_window
+
+    reminders sent 6   refused by kernel 3
+    audit 9 entries, verified, head ab2cecfddd6bdb3c...
+```
+
+**The 22:00 rows are the demonstration.** The kernel refused, so no HTTP request
+was issued — the reminder was not sent and then logged as suppressed, it was
+never sent. RBI confines collections contact to 08:00–19:00, and that is a fact
+about a clock, so no amount of model confidence can talk past it.
+
+Three things the real API taught that the mock could not:
+
+- **Contacts with repeating digits are rejected.** `Recurring digits in customer
+  contact are disallowed` — a validation rule worth hitting before a demo.
+- **Creation is rate-limited.** The first client backed off 0.5s then 1.0s for
+  everything, which is fine for a 503 and useless against a 429. Rate limits now
+  get seconds and honour `Retry-After`, and the harness discovers existing
+  receivables instead of manufacturing new ones — which is what a real
+  deployment does anyway.
+- **Error bodies had to become opt-in rather than unavailable.** They are
+  withheld from logs by default, but a 400 with no body is nearly undebuggable,
+  so `RECLAIM_GATEWAY_DEBUG=1` surfaces them. A control nobody can switch on when
+  they legitimately need it just gets worked around.
+
 ### Is it fast enough to be inline?
 
 | stage | p50 | p99 | per second |
@@ -90,8 +133,11 @@ one core clears that by ~43,000×. **Throughput is not the constraint and never
 will be.** The constraint is capacity to *act* — messages, calls, analyst time —
 which is what the capacity queue is for.
 
-The number not in that table is the model tier: a network round trip, four orders
-of magnitude slower than everything above. That is the real argument for tiering.
+The number missing from that table used to be the network. It is measured now:
+**a Razorpay round trip runs p50 576ms, p99 680ms** — about **230,000×** the
+kernel's 2.5µs. That ratio is the whole argument for the tiering. Legality is
+decided locally on facts before anything touches the network, so the expensive
+call is only ever made for an action that is already permitted.
 
 ---
 

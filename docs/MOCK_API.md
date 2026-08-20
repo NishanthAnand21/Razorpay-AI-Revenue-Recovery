@@ -131,6 +131,11 @@ Writes are gated twice over: `--execute` must be passed, and a key not beginning
 `rzp_test_` is refused unless `RECLAIM_ALLOW_LIVE_KEYS=1` is set. A recovery
 agent that executes by default is one config mistake away from charging people.
 
-A genuine *retry* also needs a customer-present flow or a saved token, which a
-key pair alone cannot produce — so what is exercisable against test keys today is
-the read side. Saying that plainly beats a demo that implies more than it does.
+`eval/run_realtime_test.py` exercises the full loop against the sandbox:
+discovers receivables, reconciles their live status, and — with `--execute` —
+sends real reminders through `POST /payment_links/:id/notify_by/:medium`, with
+the compliance kernel deciding whether each call happens at all.
+
+A genuine card *retry* still needs a customer-present flow or a saved token,
+which a key pair alone cannot produce. Payment links are the surface that is
+real end to end, and that distinction is stated rather than blurred.

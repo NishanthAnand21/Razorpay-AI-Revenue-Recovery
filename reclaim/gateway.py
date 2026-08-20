@@ -43,13 +43,44 @@ API_BASE = "https://api.razorpay.com/v1"
 # their semantics; a mock returns whatever you told it to. Both are useful and
 # they are not the same claim, so the client reports which one it is talking to.
 API_BASE_ENV = "RECLAIM_API_BASE"
+# Set to surface gateway error bodies. Off by default so error payloads do not
+# reach logs as a side effect of a failure; on when a human is debugging.
+DEBUG_ENV = "RECLAIM_GATEWAY_DEBUG"
 TIMEOUT_SECONDS = 10.0
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class GatewayError(RuntimeError):
     """A gateway call failed in a way the caller has to decide about."""
+
+
+@dataclass
+class PaymentLink:
+    """An issued, unpaid payment link: revenue at risk with an id you can act on.
+
+    The recovery surfaces elsewhere in this repo are reconstructed from synthetic
+    events. This one is real and API-addressable end to end -- a link can be
+    created, chased with an actual reminder, and reconciled -- so it is the
+    surface where the agent can be demonstrated against a live gateway rather
+    than described.
+    """
+
+    link_id: str
+    status: str                 # created | partially_paid | paid | cancelled | expired
+    amount_inr: float
+    amount_paid_inr: float = 0.0
+    short_url: str = ""
+    reminders_sent: int = 0
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def settled(self) -> bool:
+        return self.status == "paid"
+
+    @property
+    def at_risk(self) -> bool:
+        return self.status in ("created", "partially_paid")
 
 
 @dataclass
@@ -160,6 +191,27 @@ class RazorpayTestGateway:
     def name(self) -> str:
         return "razorpay-mock" if self.is_mock else "razorpay"
 
+    @staticmethod
+    def _backoff(exc, attempt: int) -> float:
+        """How long to wait before retrying.
+
+        A rate limit is not a transient error and must not be treated as one.
+        The first version backed off 0.5s then 1.0s for everything, which is
+        sensible for a 503 and useless against a 429 -- the sandbox rate-limits
+        payment-link creation and three attempts inside 1.5 seconds simply
+        produced three 429s. Rate limits get seconds, and the server's own
+        Retry-After wins over any guess we make.
+        """
+        if getattr(exc, "code", None) == 429:
+            retry_after = (exc.headers or {}).get("Retry-After")
+            if retry_after:
+                try:
+                    return min(float(retry_after), 30.0)
+                except ValueError:
+                    pass
+            return min(2.0 * (2 ** attempt), 15.0)
+        return 0.5 * (2 ** attempt)
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  idempotency_key: str | None = None) -> dict:
         url = f"{self.base}{path}"
@@ -192,15 +244,20 @@ class RazorpayTestGateway:
                         f"({raw[:60]!r}...)") from None
             except urllib.error.HTTPError as exc:
                 if exc.code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
-                    # Exponential backoff. A 429 answered by an immediate retry
-                    # is just a second 429.
-                    time.sleep(0.5 * (2 ** attempt))
+                    time.sleep(self._backoff(exc, attempt))
                     last = exc
                     continue
-                # Deliberately does not include the response body: gateway error
-                # payloads echo request context and should not land in a log by
-                # default.
-                raise GatewayError(f"{method} {path} failed: HTTP {exc.code}") from None
+                # The body is withheld by default: gateway error payloads echo
+                # request context and should not land in a log as a side effect
+                # of something failing. But withholding it makes a 400 during
+                # development almost undebuggable, so it is opt-in rather than
+                # unavailable -- a control nobody can turn on when they
+                # legitimately need it just gets worked around.
+                detail = ""
+                if os.environ.get(DEBUG_ENV):
+                    detail = f" -- {exc.read(400).decode(errors='replace')}"
+                raise GatewayError(
+                    f"{method} {path} failed: HTTP {exc.code}{detail}") from None
             except urllib.error.URLError as exc:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(0.5 * (2 ** attempt))
@@ -231,6 +288,51 @@ class RazorpayTestGateway:
             error_code=i.get("error_code"),
             error_reason=i.get("error_reason") or i.get("error_description"),
             raw=i) for i in d.get("items", [])]
+
+    # --- payment links: the one surface that is real end to end --------------
+
+    def create_payment_link(self, amount_inr: float, *, description: str,
+                            name: str, email: str, contact: str,
+                            notes: dict | None = None) -> PaymentLink:
+        if not self.allow_writes:
+            raise GatewayError("writes are disabled; pass allow_writes=True")
+        d = self._request("POST", "/payment_links", {
+            "amount": int(round(amount_inr * 100)), "currency": "INR",
+            "description": description,
+            "customer": {"name": name, "email": email, "contact": contact},
+            # Suppressed at creation on purpose: whether to contact this customer
+            # is the compliance kernel's decision, not a flag set at issue time.
+            "notify": {"sms": False, "email": False},
+            "reminder_enable": True,
+            "notes": notes or {},
+        })
+        return self._to_link(d)
+
+    def fetch_payment_link(self, link_id: str) -> PaymentLink:
+        return self._to_link(self._request("GET", f"/payment_links/{link_id}"))
+
+    def notify_payment_link(self, link_id: str, medium: str = "email") -> bool:
+        """Send a real reminder. The recovery action, actually executed.
+
+        Gated behind allow_writes like every other write: this one leaves the
+        building and reaches a person.
+        """
+        if not self.allow_writes:
+            raise GatewayError("writes are disabled; pass allow_writes=True")
+        if medium not in ("email", "sms"):
+            raise GatewayError(f"unsupported medium {medium!r}")
+        d = self._request("POST", f"/payment_links/{link_id}/notify_by/{medium}")
+        return bool(d.get("success"))
+
+    @staticmethod
+    def _to_link(d: dict) -> PaymentLink:
+        return PaymentLink(
+            link_id=d.get("id", ""), status=d.get("status", "unknown"),
+            amount_inr=float(d.get("amount", 0)) / 100.0,
+            amount_paid_inr=float(d.get("amount_paid", 0)) / 100.0,
+            short_url=d.get("short_url", ""),
+            reminders_sent=int((d.get("reminders") or {}).get("count", 0) or 0),
+            raw=d)
 
     def capture_payment(self, payment_id: str, amount_inr: float, *,
                         idempotency_key: str) -> PaymentStatus:
