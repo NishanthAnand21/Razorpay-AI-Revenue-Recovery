@@ -40,6 +40,11 @@ figures, which come from `./bin/reclaim live` against a test-mode sandbox.
 
 ## Running it
 
+**For a walkthrough:** `./demo.sh` paces the whole pitch for narration — press
+Enter between beats, or `--auto` to run it on a timer. Everything is pre-warmed
+first so nothing hangs on camera.
+
+
 `./bin/reclaim run` is the agent as a deployable process, not another evaluation. It takes
 one event at a time, decides, acts through a gateway, and prints what it did —
 **including everything it refused to do**, because a recovery agent's refusals are
@@ -583,6 +588,7 @@ reclaim/orchestrator.py one queue, one ledger, one audit chain
 reclaim/service.py      the agent as a deployable process
 reclaim/gateway.py      Razorpay test-mode client, and a stand-in
 serve.py                the live runner behind `reclaim run`
+demo.sh                 the pitch, paced for narration
 tools/mock_razorpay.py  a Razorpay stand-in over real HTTP
 bin/reclaim             the CLI: doctor, run, live, eval, test
 reclaim/config.py       layered config; secrets from the environment only
