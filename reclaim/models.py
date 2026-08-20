@@ -35,6 +35,8 @@ class Action(str, Enum):
     SWITCH_METHOD = "switch_method"            # re-attempt on a different instrument
     NUDGE_CUSTOMER = "nudge_customer"          # outreach asking the customer to act
     REQUEST_INSTRUMENT_UPDATE = "request_instrument_update"
+    ISSUE_INTEREST_NOTICE = "issue_interest_notice"  # claim statutory interest, s.16 MSMED
+    REFER_MSEFC = "refer_msefc"                # file with the facilitation council
     RECONCILE = "reconcile"                    # ask the gateway what actually happened
     ESCALATE_MANUAL = "escalate_manual"        # hand to a human, take no money action
     STOP = "stop"                              # give up, on purpose, with a reason
@@ -57,6 +59,10 @@ ACTION_COST_INR: dict[Action, float] = {
     Action.REQUEST_INSTRUMENT_UPDATE: 0.0,
     # A status lookup. Nearly free, moves no money, and is the only correct first
     # move when the last attempt's outcome is unknown.
+    # A formal interest notice is drafted once and reused; the referral is a real
+    # filing with real preparation behind it.
+    Action.ISSUE_INTEREST_NOTICE: 5.0,
+    Action.REFER_MSEFC: 1500.0,
     Action.RECONCILE: 0.10,
     Action.ESCALATE_MANUAL: 25.0,             # ~2 min of an ops analyst's time
     Action.STOP: 0.0,

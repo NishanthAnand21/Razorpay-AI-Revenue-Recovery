@@ -144,6 +144,12 @@ class ObservableState:
     mandate_active: bool = True
     is_disputed: bool = False
     is_collections: bool = False               # receivables chasing
+    # Receivables-only facts. Statutory remedies are only available to suppliers
+    # who actually qualify for them, and asserting one otherwise is a false legal
+    # claim -- so eligibility is a fact the kernel checks, never an inference.
+    supplier_is_msme: bool = False
+    days_past_appointed_day: int = 0
+    promise_to_pay_open: bool = False
 
 
 @dataclass
@@ -293,6 +299,30 @@ def vetoes(s: ObservableState) -> list[Veto]:
             "the customer withdrew consent to be contacted",
             "DPDP Act 2023",
         ))
+    # --- statutory remedies --------------------------------------------------
+    if not s.supplier_is_msme:
+        out.append(Veto(
+            "not_an_msme_supplier", {Action.ISSUE_INTEREST_NOTICE, Action.REFER_MSEFC},
+            "s.15/s.16 remedies are available only to registered micro and small "
+            "suppliers; asserting them otherwise is a false legal claim",
+            "MSMED Act 2006, s.2",
+        ))
+    if s.days_past_appointed_day <= 0:
+        out.append(Veto(
+            "not_yet_overdue", {Action.ISSUE_INTEREST_NOTICE, Action.REFER_MSEFC},
+            "interest under s.16 accrues only from the appointed day; nothing is "
+            "owed before it",
+            "MSMED Act 2006, s.16",
+        ))
+    if s.promise_to_pay_open:
+        # A promise we solicited and then chased through is worse than not asking.
+        out.append(Veto(
+            "promise_to_pay_outstanding", OUTREACH_ACTIONS | {Action.REFER_MSEFC},
+            "the buyer committed to a date that has not yet passed; chasing "
+            "inside a promise we accepted destroys the only leverage it gave us",
+            "collections practice",
+        ))
+
     if s.is_disputed:
         out.append(Veto(
             "under_dispute", MONEY_ACTIONS | OUTREACH_ACTIONS,
